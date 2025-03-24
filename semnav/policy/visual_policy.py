@@ -8,10 +8,10 @@ from habitat_baselines.common.baseline_registry import baseline_registry
 from habitat_baselines.rl.models.rnn_state_encoder import build_rnn_state_encoder
 from habitat_baselines.rl.ppo import Net
 
-from pirlnav.policy.policy import ILPolicy
-from pirlnav.policy.transforms import get_transform
-from pirlnav.policy.visual_encoder import VisualEncoder
-from pirlnav.utils.utils import load_encoder
+from semnav.policy.policy import ILPolicy
+from semnav.policy.transforms import get_transform
+from semnav.policy.visual_encoder import VisualEncoder
+from semnav.utils.utils import load_encoder
 
 class Semantic_ObjectNavILMAENet(Net):
     r"""A baseline sequence to sequence network that concatenates instruction,

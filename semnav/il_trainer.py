@@ -1,14 +1,20 @@
+#!/usr/bin/env python3
+
+# Copyright (c) Facebook, Inc. and its affiliates.
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+
 import contextlib
 import os
 import random
 import time
 from collections import defaultdict, deque
 from typing import Any, Dict, List
-
+import wandb
 import numpy as np
 import torch
-import torch.nn as nn
 import tqdm
+import re
 from gym import spaces
 from habitat import Config, logger
 from habitat.utils import profiling_wrapper
@@ -20,7 +26,6 @@ from habitat_baselines.common.obs_transformers import (
     apply_obs_transforms_obs_space,
     get_active_obs_transforms,
 )
-from pirlnav.common.RLrollout_storage import RolloutStorage
 from habitat_baselines.common.tensorboard_utils import TensorboardWriter, get_writer
 from habitat_baselines.rl.ddppo.ddp_utils import (
     EXIT,
@@ -34,186 +39,309 @@ from habitat_baselines.rl.ddppo.ddp_utils import (
 )
 from habitat_baselines.rl.ppo.ppo_trainer import PPOTrainer
 from habitat_baselines.utils.common import (
+    ObservationBatchingCache,
     action_array_to_dict,
     batch_obs,
     generate_video,
     get_num_actions,
     is_continuous_action_space,
+    linear_decay,
 )
 
-from pirlnav.algos.ppo import DDPPO, PPO
-from pirlnav.utils.lr_scheduler import PIRLNavLRScheduler
+from torch import nn as nn
+from torch.optim.lr_scheduler import CyclicLR
+from torch.optim.lr_scheduler import LambdaLR
+
+from semnav.algos.agent import DDPILAgent
+from semnav.algos.agent import Semantic_DDPILAgent
+from semnav.common.rollout_storage import RolloutStorage
+import cv2
 
 
-@baseline_registry.register_trainer(name="pirlnav-ddppo")
-@baseline_registry.register_trainer(name="pirlnav-ppo")
-class PIRLNavPPOTrainer(PPOTrainer):
+
+
+@baseline_registry.register_trainer(name="semnav-il")
+class ILEnvDDPTrainer(PPOTrainer):
     def __init__(self, config=None):
         super().__init__(config)
-    def _update_agent(self):
-        ppo_cfg = self.config.RL.PPO
-        t_update_model = time.time()
-        with torch.no_grad():
-            step_batch = self.rollouts.buffers[
-                self.rollouts.current_rollout_step_idx
-            ]
-            next_value = self.actor_critic.get_value(
-                step_batch["observations"],
-                step_batch["recurrent_hidden_states"],
-                step_batch["prev_actions"],
-                step_batch["masks"],
+        #self.gss = GlobalSemantic()
+
+    def _setup_actor_critic_agent(self, il_cfg: Config) -> None:
+        r"""Sets up actor critic and agent for IL.
+
+        Args:
+            il_cfg: config node with relevant params
+
+        Returns:
+            None
+        """
+        logger.add_filehandler(self.config.LOG_FILE)
+
+        observation_space = self.envs.observation_spaces[0]
+        self.obs_transforms = get_active_obs_transforms(self.config)
+        observation_space = apply_obs_transforms_obs_space(
+            observation_space, self.obs_transforms
+        )
+        self.obs_space = observation_space
+
+        policy = baseline_registry.get_policy(self.config.IL.POLICY.name)
+        self.actor_critic = policy.from_config(
+            self.config, observation_space, self.envs.action_spaces[0]
+        )
+        self.actor_critic.to(self.device)
+        if 'semantic' in observation_space.spaces:
+            self.agent = Semantic_DDPILAgent(
+                actor_critic=self.actor_critic,
+                num_envs=self.envs.num_envs,
+                num_mini_batch=il_cfg.num_mini_batch,
+                lr=il_cfg.lr,
+                encoder_lr=il_cfg.encoder_lr,
+                eps=il_cfg.eps,
+                max_grad_norm=il_cfg.max_grad_norm,
+                wd=il_cfg.wd,
+                entropy_coef=il_cfg.entropy_coef,
+            )
+        else:
+            self.agent = DDPILAgent(
+                actor_critic=self.actor_critic,
+                num_envs=self.envs.num_envs,
+                num_mini_batch=il_cfg.num_mini_batch,
+                lr=il_cfg.lr,
+                encoder_lr=il_cfg.encoder_lr,
+                eps=il_cfg.eps,
+                max_grad_norm=il_cfg.max_grad_norm,
+                wd=il_cfg.wd,
+                entropy_coef=il_cfg.entropy_coef,
             )
 
-        self.rollouts.compute_returns(
-            next_value, ppo_cfg.use_gae, ppo_cfg.gamma, ppo_cfg.tau
+    def _init_train(self):
+        #If there is some checkpoint we will want to take this checkpoint in order to start working again
+
+        resume_state = load_resume_state(self.config)
+
+        #Unless is there is no checkpoint, in that case we will have nothing to unfreeze
+        #This line changes the configuration to the one the ckpt was done, not interesting for us in this moment
+        if resume_state is not None:
+            #None
+            # resume_state["config"]['NUM_UPDATES'] = 60000000
+            # resume_state["config"]['NUM_CHECKPOINTS'] = 1000
+            self.config: Config = resume_state["config"]
+        #Distributed is in order to parallel the work, it seems to be necessary
+        if self.config.RL.DDPPO.force_distributed:
+            self._is_distributed = True
+
+        if is_slurm_batch_job():
+            add_signal_handlers()
+
+        # Add replay sensors
+        self.config.defrost()
+
+        #This are the sensors that will be repeated in behavior cloning
+        self.config.TASK_CONFIG.TASK.SENSORS.extend(
+            ["DEMONSTRATION_SENSOR", "INFLECTION_WEIGHT_SENSOR"]
         )
 
-        self.agent.train()
+        self.config.freeze()
 
-        value_loss, action_loss, dist_entropy = self.agent.update(
-            self.rollouts
+        if self._is_distributed:
+            #All of this seems to be configurations in order to parallel the work
+            local_rank, tcp_store = init_distrib_slurm(
+                self.config.RL.DDPPO.distrib_backend
+            )
+
+
+            if rank0_only():
+                logger.info(
+                    "Initialized DD-PPO with {} workers".format(
+                        torch.distributed.get_world_size()
+                    )
+                )
+
+            self.config.defrost()
+            #Save the gpus to be used in the task
+            self.config.TORCH_GPU_ID = local_rank
+            self.config.SIMULATOR_GPU_ID = local_rank
+            # Multiply by the number of simulators to make sure they also get unique seeds
+            #Generate seeds for every GPU and for every environment
+            self.config.TASK_CONFIG.SEED += (
+                torch.distributed.get_rank() * self.config.NUM_ENVIRONMENTS
+            )
+            self.config.freeze()
+
+            random.seed(self.config.TASK_CONFIG.SEED)
+            np.random.seed(self.config.TASK_CONFIG.SEED)
+            torch.manual_seed(self.config.TASK_CONFIG.SEED)
+
+            #A rollout will be a sequence of steps without interruption
+            self.num_rollouts_done_store = torch.distributed.PrefixStore(
+                "rollout_tracker", tcp_store
+            )
+            self.num_rollouts_done_store.set("num_done", "0")
+
+        if rank0_only() and self.config.VERBOSE:
+            logger.info(f"config: {self.config}")
+
+        profiling_wrapper.configure(
+            capture_start_step=self.config.PROFILING.CAPTURE_START_STEP,
+            num_steps_to_capture=self.config.PROFILING.NUM_STEPS_TO_CAPTURE,
         )
 
-        self.rollouts.after_update()
-        self.pth_time += time.time() - t_update_model
+        #Environments are initialized
+        self._init_envs()
 
-        return (
-            value_loss,
-            action_loss,
-            dist_entropy,
+        #What actions are going to be used 4 or 6
+        action_space = self.envs.action_spaces[0]
+        self.policy_action_space = action_space
+
+        #We check if we are taking discrete point nav or continuous pointnav
+        if is_continuous_action_space(action_space):
+            # Assume ALL actions are NOT discrete
+            action_shape = (get_num_actions(action_space),)
+            discrete_actions = False
+        else:
+            # For discrete pointnav
+            action_shape = None
+            discrete_actions = True
+        #Save IL configurations
+        il_cfg = self.config.IL.BehaviorCloning
+        #Save Policy configurations
+        policy_cfg = self.config.POLICY
+        #POLICY INCLUDES: RGB ENCODER: hidden_size  512 image size 256
+        # State encoder: hidden size 2048 recurrent layers 2 (GRU)
+        # use previous action: True
+        #critic: in il no_critic True
+        if torch.cuda.is_available():
+            self.device = torch.device("cuda", self.config.TORCH_GPU_ID)
+            torch.cuda.set_device(self.device)
+        else:
+            self.device = torch.device("cpu")
+
+        if rank0_only() and not os.path.isdir(self.config.CHECKPOINT_FOLDER):
+            os.makedirs(self.config.CHECKPOINT_FOLDER)
+        #Set the critic
+        self._setup_actor_critic_agent(il_cfg)
+        #Distributed training start, find_unused_params is a way to construct the training and communicate different
+        #proccesses in a distributed training
+        if self._is_distributed:
+            self.agent.init_distributed(find_unused_params=True)  # type: ignore
+
+        logger.info(
+            "agent number of parameters: {}".format(
+                sum(param.numel() for param in self.agent.parameters())
+            )
         )
-    def _collect_environment_result(self, buffer_index: int = 0):
-        num_envs = self.envs.num_envs
-        env_slice = slice(
-            int(buffer_index * num_envs / self._nbuffers),
-            int((buffer_index + 1) * num_envs / self._nbuffers),
+        #starts getting the space information
+        obs_space = self.obs_space
+        if self._static_encoder:
+            self._encoder = self.actor_critic.net.visual_encoder
+            obs_space = spaces.Dict(
+                {
+                    "visual_features": spaces.Box(
+                        low=np.finfo(np.float32).min,
+                        high=np.finfo(np.float32).max,
+                        shape=self._encoder.output_shape,
+                        dtype=np.float32,
+                    ),
+                    **obs_space.spaces,
+                }
+            )
+
+        self._nbuffers = 2 if il_cfg.use_double_buffered_sampler else 1
+        #sets rollouts initialization
+        self.rollouts = RolloutStorage(
+            il_cfg.num_steps,
+            self.envs.num_envs,
+            obs_space,
+            self.policy_action_space,
+            policy_cfg.STATE_ENCODER.hidden_size,
+            num_recurrent_layers=self.actor_critic.net.num_recurrent_layers,
+            is_double_buffered=il_cfg.use_double_buffered_sampler,
+            action_shape=action_shape,
+            discrete_actions=discrete_actions,
         )
+        self.rollouts.to(self.device)
 
-        t_step_env = time.time()
-        outputs = [
-            self.envs.wait_step_at(index_env)
-            for index_env in range(env_slice.start, env_slice.stop)
-        ]
+        observations = self.envs.reset()
 
-        observations, rewards_l, dones, infos = [
-            list(x) for x in zip(*outputs)
-        ]
-        constant = 414534
-        # constant = 9994
-        semantic_array = torch.tensor(
-            np.array([obs["semantic"] for obs in observations]),
-            dtype=torch.int32,
-            device=self.device
-        ) * constant
+        ###########
+        if 'semantic' in obs_space.spaces:
+            for i in range(self.envs.num_envs):
+                observations[i]["semantic_rgb"] = np.zeros([480,640,3])
+        # observations_mult = np.array([diccionario['semantic'] for diccionario in observations])
+        # observations_mult *= 17
+        # matriz_rgb = np.zeros((2, 480, 640, 3), dtype=np.uint8)
+        # matriz_rgb[:, :, :, 0] = (observations_mult[:, :, :, 0] >> 16) & 0xFF  # R
+        # matriz_rgb[:, :, :, 1] = (observations_mult[:, :, :, 0] >> 8) & 0xFF  # G
+        # matriz_rgb[:, :, :, 2] = observations_mult[:, :, :, 0] & 0xFF  # B
+        # for i in range(self.envs.num_envs):
+        #     observations[i]["semantic_rgb"] = matriz_rgb[i,:,:,:]
+        ###########
+        #########
+        # current_episode = self.envs.current_episodes()
+        # for i in range(self.envs.num_envs):
+        #     print("ey")
+        #     print(current_episode[i].scene_id)
+        # current_episode = self.envs.current_episodes() #Esto no actualiza posiciones de ningún tipo, es idempotente
+        # scene_id = [None] * self.envs.num_envs
+        # for i in range(self.envs.num_envs):
+        #     scene_id[i] = current_episode[i].scene_id
+        #     scene_cut_id = re.findall(self.gss.patron, scene_id[i])
+        #     semantic_rgb_values = np.array(list(self.gss.allscenes_rgb_dictionary[scene_cut_id[0]].values()))
+        #     observations[i]["semantic_rgb"] = np.squeeze(semantic_rgb_values[observations[i]['semantic']])
 
-        # Crear el tensor `rgb_matrix` en el formato esperado (batch, 480, 640, 3)
-        rgb_matrix = torch.zeros((semantic_array.size(0), 480, 640, 3), dtype=torch.uint8, device=semantic_array.device)
-        rgb_matrix[:, :, :, 0] = (semantic_array[:, :, :, 0] >> 16) & 0xFF  # R
-        rgb_matrix[:, :, :, 1] = (semantic_array[:, :, :, 0] >> 8) & 0xFF  # G
-        rgb_matrix[:, :, :, 2] = semantic_array[:, :, :, 0] & 0xFF  # B
-
-        # Añadir `semantic_rgb` a cada observación sin bucle
-        for i, obs in enumerate(observations):
-            obs["semantic_rgb"] = rgb_matrix[i].cpu().numpy()
-        self.env_time += time.time() - t_step_env
-
-        t_update_stats = time.time()
+        ############
         batch = batch_obs(
             observations, device=self.device, cache=self._obs_batching_cache
         )
         batch = apply_obs_transforms_batch(batch, self.obs_transforms)  # type: ignore
 
-        rewards = torch.tensor(
-            rewards_l,
-            dtype=torch.float,
-            device=self.current_episode_reward.device,
-        )
-        rewards = rewards.unsqueeze(1)
-
-        not_done_masks = torch.tensor(
-            [[not done] for done in dones],
-            dtype=torch.bool,
-            device=self.current_episode_reward.device,
-        )
-        done_masks = torch.logical_not(not_done_masks)
-
-        self.current_episode_reward[env_slice] += rewards
-        current_ep_reward = self.current_episode_reward[env_slice]
-        self.running_episode_stats["reward"][env_slice] += current_ep_reward.where(done_masks, current_ep_reward.new_zeros(()))  # type: ignore
-        self.running_episode_stats["count"][env_slice] += done_masks.float()  # type: ignore
-        for k, v_k in self._extract_scalars_from_infos(infos).items():
-            v = torch.tensor(
-                v_k,
-                dtype=torch.float,
-                device=self.current_episode_reward.device,
-            ).unsqueeze(1)
-            if k not in self.running_episode_stats:
-                self.running_episode_stats[k] = torch.zeros_like(
-                    self.running_episode_stats["count"]
-                )
-
-            self.running_episode_stats[k][env_slice] += v.where(done_masks, v.new_zeros(()))  # type: ignore
-
-        self.current_episode_reward[env_slice].masked_fill_(done_masks, 0.0)
-
         if self._static_encoder:
             with torch.no_grad():
                 batch["visual_features"] = self._encoder(batch)
 
-        self.rollouts.insert(
-            next_observations=batch,
-            rewards=rewards,
-            next_masks=not_done_masks,
-            buffer_index=buffer_index,
+        self.rollouts.buffers["observations"][0] = batch  # type: ignore
+
+        self.current_episode_reward = torch.zeros(self.envs.num_envs, 1)
+        self.running_episode_stats = dict(
+            count=torch.zeros(self.envs.num_envs, 1),
+            reward=torch.zeros(self.envs.num_envs, 1),
+        )
+        self.window_episode_stats = defaultdict(
+            lambda: deque(maxlen=il_cfg.reward_window_size)
         )
 
-        self.rollouts.advance_rollout(buffer_index)
-
-        self.pth_time += time.time() - t_update_stats
-
-        return env_slice.stop - env_slice.start
+        self.env_time = 0.0
+        self.pth_time = 0.0
+        self.t_start = time.time()
 
     def _compute_actions_and_step_envs(self, buffer_index: int = 0):
-        constant = 414534
-        # constant = 9994
-
-        # print(batch["observations"]["rgb"])
-        # print(torch.any(batch["observations"]["semantic"]))
-        observations_mult = self.rollouts.buffers["observations"]["semantic"] * constant
-
-        rgb_matrix = torch.zeros((observations_mult.size(0), observations_mult.size(1), 480, 640, 3), dtype=torch.uint8,
-                                 device=observations_mult.device)
-        rgb_matrix[:, :, :, :, 0] = (observations_mult[:, :, :, :, 0] >> 16) & 0xFF  # R
-        rgb_matrix[:, :, :, :, 1] = (observations_mult[:, :, :, :, 0] >> 8) & 0xFF  # G
-        rgb_matrix[:, :, :, :, 2] = observations_mult[:, :, :, :, 0] & 0xFF  # B
-        self.rollouts.buffers["observations"]["semantic_rgb"] = rgb_matrix
         num_envs = self.envs.num_envs
         env_slice = slice(
             int(buffer_index * num_envs / self._nbuffers),
             int((buffer_index + 1) * num_envs / self._nbuffers),
         )
-
         t_sample_action = time.time()
+        # fetch actions from replay buffer
+        step_batch = self.rollouts.buffers[
+            self.rollouts.current_rollout_step_idxs[buffer_index],
+            env_slice,
+        ]
 
-        # sample actions
-        with torch.no_grad():
-            step_batch = self.rollouts.buffers[
-                self.rollouts.current_rollout_step_idxs[buffer_index],
-                env_slice,
-            ]
+        #print(self.envs.current_episodes())
+        # current_episode = self.envs.current_episodes() #Esto no actualiza posiciones de ningún tipo, es idempotente
+        # scene_id = [None] * self.envs.num_envs
+        # step_batch["observations"]['semantic'].putpalette(d3_40_colors_rgb.flatten())
+        # step_batch["observations"]['semantic'].putdata((step_batch["observations"]['semantic'].flatten() % 40).astype(np.uint8))
+        # step_batch["observations"]['semantic'] = step_batch["observations"]['semantic'].convert("RGBA")
 
-            profiling_wrapper.range_push("compute actions")
-            (
-                values,
-                actions,
-                actions_log_probs,
-                recurrent_hidden_states,
-            ) = self.actor_critic.act(
-                step_batch["observations"],
-                step_batch["recurrent_hidden_states"],
-                step_batch["prev_actions"],
-                step_batch["masks"],
-            )
+        # semantic_txt_path = [None] * self.envs.num_envs
+        # for i in range(self.envs.num_envs):
+        #     scene_id[i] = current_episode[i].scene_id
+        #     scene_cut_id = re.findall(self.gss.patron, scene_id[i])
+        #     semantic_rgb_values = torch.tensor(list(self.gss.allscenes_rgb_dictionary[scene_cut_id[0]].values()))
+        #     step_batch["observations"]["semantic_rgb"][i] = semantic_rgb_values[step_batch["observations"]['semantic'][i].long()].squeeze(2)
+        next_actions = step_batch["observations"]["next_actions"]
+        actions = next_actions.long().unsqueeze(-1)
 
         # NB: Move actions to CPU.  If CUDA tensors are
         # sent in to env.step(), that will create CUDA contexts
@@ -241,87 +369,35 @@ class PIRLNavPPOTrainer(PPOTrainer):
         self.env_time += time.time() - t_step_env
 
         self.rollouts.insert(
-            next_recurrent_hidden_states=recurrent_hidden_states,
             actions=actions,
-            action_log_probs=actions_log_probs,
-            value_preds=values,
             buffer_index=buffer_index,
         )
-    def _setup_actor_critic_agent(self, ppo_cfg: Config) -> None:
-        r"""Sets up actor critic and agent for PPO.
-        Args:
-            ppo_cfg: config node with relevant params
-        Returns:
-            None
-        """
-        logger.add_filehandler(self.config.LOG_FILE)
 
-        policy = baseline_registry.get_policy(self.config.RL.POLICY.name)
-        observation_space = self.obs_space
-        self.obs_transforms = get_active_obs_transforms(self.config)
-        observation_space = apply_obs_transforms_obs_space(
-            observation_space, self.obs_transforms
-        )
+    @profiling_wrapper.RangeContext("_update_agent")
+    def _update_agent(self):
+        t_update_model = time.time()
 
-        logger.info("Setting up policy in PIRLNav trainer..........")
+        self.agent.train()
 
-        self.actor_critic = policy.from_config(
-            self.config, observation_space, self.policy_action_space
-        )
-        self.obs_space = observation_space
-        self.actor_critic.to(self.device)
+        (
+            action_loss,
+            rnn_hidden_states,
+            dist_entropy,
+            _,
+        ) = self.agent.update(self.rollouts)
 
-        if (
-            self.config.RL.DDPPO.pretrained_encoder
-            or self.config.RL.DDPPO.pretrained
-        ):
-            try:
-                pretrained_state = torch.load(
-                    self.config.RL.DDPPO.pretrained_weights, map_location="cpu"
-                )
-                logger.info("Weights Fine.")
-            except Exception as e:
-                logger.error("Weights not fine: %s", e)
+        self.rollouts.after_update(rnn_hidden_states)
+        self.pth_time += time.time() - t_update_model
 
-        if self.config.RL.DDPPO.pretrained:
-            self.actor_critic.load_state_dict(
-                {k[len("actor_critic."):]: v for k, v in pretrained_state["state_dict"].items()}, strict=False
-            )
-        elif self.config.RL.DDPPO.pretrained_encoder:
-            prefix = "actor_critic.net.visual_encoder."
-            self.actor_critic.net.visual_encoder.load_state_dict(
-                {
-                    k[len(prefix) :]: v
-                    for k, v in pretrained_state["state_dict"].items()
-                    if k.startswith(prefix)
-                }
-            )
-
-        if not self.config.RL.DDPPO.train_encoder:
-            self._static_encoder = True
-            for param in self.actor_critic.net.visual_encoder.parameters():
-                param.requires_grad_(False)
-
-        if self.config.RL.DDPPO.reset_critic:
-            nn.init.orthogonal_(self.actor_critic.critic.fc.weight)
-            nn.init.constant_(self.actor_critic.critic.fc.bias, 0)
-
-        self.agent = (DDPPO if self._is_distributed else PPO)(
-            actor_critic=self.actor_critic,
-            clip_param=ppo_cfg.clip_param,
-            ppo_epoch=ppo_cfg.ppo_epoch,
-            num_mini_batch=ppo_cfg.num_mini_batch,
-            value_loss_coef=ppo_cfg.value_loss_coef,
-            entropy_coef=ppo_cfg.entropy_coef,
-            lr=ppo_cfg.lr,
-            eps=ppo_cfg.eps,
-            max_grad_norm=ppo_cfg.max_grad_norm,
-            use_normalized_advantage=ppo_cfg.use_normalized_advantage,
+        return (
+            action_loss,
+            dist_entropy,
         )
 
     @profiling_wrapper.RangeContext("train")
     def train(self) -> None:
         r"""Main method for training DD/PPO.
+
         Returns:
             None
         """
@@ -330,20 +406,21 @@ class PIRLNavPPOTrainer(PPOTrainer):
 
         count_checkpoints = 0
         prev_time = 0
-
-        lr_scheduler = PIRLNavLRScheduler(
-            optimizer=self.agent.optimizer,
-            agent=self.agent,
-            num_updates=self.config.NUM_UPDATES,
-            base_lr=self.config.RL.PPO.lr,
-            finetuning_lr=self.config.RL.Finetune.lr,
-            ppo_eps=self.config.RL.PPO.eps,
-            start_actor_update_at=self.config.RL.Finetune.start_actor_update_at,
-            start_actor_warmup_at=self.config.RL.Finetune.start_actor_warmup_at,
-            start_critic_update_at=self.config.RL.Finetune.start_critic_update_at,
-            start_critic_warmup_at=self.config.RL.Finetune.start_critic_warmup_at,
+        il_cfg = self.config.IL.BehaviorCloning
+        lr_scheduler = LambdaLR(
+            lr_lambda=lambda x: 1 - self.percent_done(),
         )
+        # lr_scheduler = CyclicLR(
+        #     optimizer=self.agent.optimizer,
+        #     mode='exp_range',
+        #     base_lr=il_cfg.lr,
+        #     max_lr=il_cfg.lr*il_cfg.CYCLIC_LR.multiplication_factor,
+        #     gamma=il_cfg.CYCLIC_LR.gamma,
+        #     cycle_momentum=False,
+        #     step_size_up=il_cfg.CYCLIC_LR.step_size_up
+        # )
         resume_state = load_resume_state(self.config)
+
         if resume_state is not None:
             self.agent.load_state_dict(resume_state["state_dict"])
             self.agent.optimizer.load_state_dict(resume_state["optim_state"])
@@ -365,9 +442,12 @@ class PIRLNavPPOTrainer(PPOTrainer):
                 requeue_stats["window_episode_stats"]
             )
 
+        #PPO config and il_config are saved
         ppo_cfg = self.config.RL.PPO
+        il_cfg = self.config.IL.BehaviorCloning
 
         with (
+            #Tensorboard
             get_writer(self.config, flush_secs=self.flush_secs)
             if rank0_only()
             else contextlib.suppress()
@@ -376,12 +456,13 @@ class PIRLNavPPOTrainer(PPOTrainer):
                 profiling_wrapper.on_start_step()
                 profiling_wrapper.range_push("train update")
 
-                if ppo_cfg.use_linear_clip_decay:
-                    self.agent.clip_param = ppo_cfg.clip_param * (
+                if il_cfg.use_linear_clip_decay:
+                    self.agent.clip_param = il_cfg.clip_param * (
                         1 - self.percent_done()
                     )
 
                 if rank0_only() and self._should_save_resume_state():
+                    #Resume state is saved
                     requeue_stats = dict(
                         env_time=self.env_time,
                         pth_time=self.pth_time,
@@ -414,17 +495,18 @@ class PIRLNavPPOTrainer(PPOTrainer):
 
                     return
 
-                self.agent.eval()
+                self.agent.eval() #When is training, not done
                 count_steps_delta = 0
                 profiling_wrapper.range_push("rollouts loop")
+
                 profiling_wrapper.range_push("_collect_rollout_step")
                 for buffer_index in range(self._nbuffers):
                     self._compute_actions_and_step_envs(buffer_index)
 
-                for step in range(ppo_cfg.num_steps):
+                for step in range(il_cfg.num_steps):
                     is_last_step = (
                         self.should_end_early(step + 1)
-                        or (step + 1) == ppo_cfg.num_steps
+                        or (step + 1) == il_cfg.num_steps
                     )
 
                     for buffer_index in range(self._nbuffers):
@@ -450,19 +532,18 @@ class PIRLNavPPOTrainer(PPOTrainer):
 
                 if self._is_distributed:
                     self.num_rollouts_done_store.add("num_done", 1)
+
                 (
-                    value_loss,
                     action_loss,
                     dist_entropy,
                 ) = self._update_agent()
 
-                if ppo_cfg.use_linear_lr_decay:
+                if il_cfg.use_linear_lr_decay:
                     lr_scheduler.step()  # type: ignore
 
                 self.num_updates_done += 1
                 losses = self._coalesce_post_step(
                     dict(
-                        value_loss=value_loss,
                         action_loss=action_loss,
                         entropy=dist_entropy,
                     ),
@@ -485,156 +566,7 @@ class PIRLNavPPOTrainer(PPOTrainer):
                 profiling_wrapper.range_pop()  # train update
 
             self.envs.close()
-
-    def _init_train(self):
-
-        resume_state = load_resume_state(self.config)
-        if resume_state is not None:
-            self.config: Config = resume_state["config"]
-            self.using_velocity_ctrl = (
-                self.config.TASK_CONFIG.TASK.POSSIBLE_ACTIONS
-            ) == ["VELOCITY_CONTROL"]
-
-        if self.config.RL.DDPPO.force_distributed:
-            self._is_distributed = True
-
-        if is_slurm_batch_job():
-            add_signal_handlers()
-
-        if self._is_distributed:
-            local_rank, tcp_store = init_distrib_slurm(
-                self.config.RL.DDPPO.distrib_backend
-            )
-            if rank0_only():
-                logger.info(
-                    "Initialized DD-PPO with {} workers".format(
-                        torch.distributed.get_world_size()
-                    )
-                )
-
-            self.config.defrost()
-            self.config.TORCH_GPU_ID = local_rank
-            self.config.SIMULATOR_GPU_ID = local_rank
-            # Multiply by the number of simulators to make sure they also get unique seeds
-            self.config.TASK_CONFIG.SEED += (
-                torch.distributed.get_rank() * self.config.NUM_ENVIRONMENTS
-            )
-            self.config.freeze()
-
-            random.seed(self.config.TASK_CONFIG.SEED)
-            np.random.seed(self.config.TASK_CONFIG.SEED)
-            torch.manual_seed(self.config.TASK_CONFIG.SEED)
-            self.num_rollouts_done_store = torch.distributed.PrefixStore(
-                "rollout_tracker", tcp_store
-            )
-            self.num_rollouts_done_store.set("num_done", "0")
-
-        if rank0_only() and self.config.VERBOSE:
-            logger.info(f"config: {self.config}")
-
-        profiling_wrapper.configure(
-            capture_start_step=self.config.PROFILING.CAPTURE_START_STEP,
-            num_steps_to_capture=self.config.PROFILING.NUM_STEPS_TO_CAPTURE,
-        )
-
-        self._init_envs()
-
-        action_space = self.envs.action_spaces[0]
-        if self.using_velocity_ctrl:
-            # For navigation using a continuous action space for a task that
-            # may be asking for discrete actions
-            self.policy_action_space = action_space["VELOCITY_CONTROL"]
-            action_shape = (2,)
-            discrete_actions = False
-        else:
-            self.policy_action_space = action_space
-            if is_continuous_action_space(action_space):
-                # Assume ALL actions are NOT discrete
-                action_shape = (get_num_actions(action_space),)
-                discrete_actions = False
-            else:
-                # For discrete pointnav
-                action_shape = None
-                discrete_actions = True
-
-        ppo_cfg = self.config.RL.PPO
-        policy_cfg = self.config.POLICY
-        if torch.cuda.is_available():
-            self.device = torch.device("cuda", self.config.TORCH_GPU_ID)
-            torch.cuda.set_device(self.device)
-        else:
-            self.device = torch.device("cpu")
-
-        if rank0_only() and not os.path.isdir(self.config.CHECKPOINT_FOLDER):
-            os.makedirs(self.config.CHECKPOINT_FOLDER)
-
-        self._setup_actor_critic_agent(ppo_cfg)
-        if self._is_distributed:
-            self.agent.init_distributed(find_unused_params=True)  # type: ignore
-
-        logger.info(
-            "agent number of parameters: {}".format(
-                sum(param.numel() for param in self.agent.parameters())
-            )
-        )
-
-        obs_space = self.obs_space
-        if self._static_encoder:
-            self._encoder = self.actor_critic.net.visual_encoder
-            obs_space = spaces.Dict(
-                {
-                    "visual_features": spaces.Box(
-                        low=np.finfo(np.float32).min,
-                        high=np.finfo(np.float32).max,
-                        shape=self._encoder.output_shape,
-                        dtype=np.float32,
-                    ),
-                    **obs_space.spaces,
-                }
-            )
-
-        self._nbuffers = 2 if ppo_cfg.use_double_buffered_sampler else 1
-
-        self.rollouts = RolloutStorage(
-            ppo_cfg.num_steps,
-            self.envs.num_envs,
-            obs_space,
-            self.policy_action_space,
-            policy_cfg.STATE_ENCODER.hidden_size,
-            num_recurrent_layers=self.actor_critic.net.num_recurrent_layers,
-            is_double_buffered=ppo_cfg.use_double_buffered_sampler,
-            action_shape=action_shape,
-            discrete_actions=discrete_actions,
-        )
-        self.rollouts.to(self.device)
-
-        observations = self.envs.reset()
-        if 'semantic' in obs_space.spaces:
-            for i in range(self.envs.num_envs):
-                observations[i]["semantic_rgb"] = np.zeros([480,640,3])
-        batch = batch_obs(
-            observations, device=self.device, cache=self._obs_batching_cache
-        )
-        batch = apply_obs_transforms_batch(batch, self.obs_transforms)  # type: ignore
-
-        if self._static_encoder:
-            with torch.no_grad():
-                batch["visual_features"] = self._encoder(batch)
-
-        self.rollouts.buffers["observations"][0] = batch  # type: ignore
-
-        self.current_episode_reward = torch.zeros(self.envs.num_envs, 1)
-        self.running_episode_stats = dict(
-            count=torch.zeros(self.envs.num_envs, 1),
-            reward=torch.zeros(self.envs.num_envs, 1),
-        )
-        self.window_episode_stats = defaultdict(
-            lambda: deque(maxlen=ppo_cfg.reward_window_size)
-        )
-
-        self.env_time = 0.0
-        self.pth_time = 0.0
-        self.t_start = time.time()
+            cv2.destroyAllWindows()
 
     @rank0_only
     def _training_log(
@@ -672,11 +604,6 @@ class PIRLNavPPOTrainer(PPOTrainer):
         fps = self.num_steps_done / ((time.time() - self.t_start) + prev_time)
         writer.add_scalar("metrics/fps", fps, self.num_steps_done)
 
-        lrs = {}
-        for i, param_group in enumerate(self.agent.optimizer.param_groups):
-            lrs["pg_{}".format(i)] = param_group["lr"]
-        writer.add_scalars("learning_rate", lrs, self.num_steps_done)
-
         # log stats
         if self.num_updates_done % self.config.LOG_INTERVAL == 0:
             logger.info(
@@ -697,12 +624,15 @@ class PIRLNavPPOTrainer(PPOTrainer):
             )
 
             logger.info(
-                "Average window size: {}  {}".format(
+                "Average window size: {}  {}  {}".format(
                     len(self.window_episode_stats["count"]),
                     "  ".join(
                         "{}: {:.3f}".format(k, v / deltas["count"])
                         for k, v in deltas.items()
                         if k != "count"
+                    ),
+                    "  ".join(
+                        "{}: {:.3f}".format(k, v) for k, v in losses.items()
                     ),
                 )
             )
@@ -739,11 +669,9 @@ class PIRLNavPPOTrainer(PPOTrainer):
         else:
             config = self.config.clone()
 
-        ppo_cfg = config.RL.PPO
-        policy_cfg = config.POLICY
-
         config.defrost()
         config.TASK_CONFIG.DATASET.SPLIT = config.EVAL.SPLIT
+        config.TASK_CONFIG.DATASET.TYPE = "ObjectNav-v1"
         config.freeze()
 
         if (
@@ -778,18 +706,23 @@ class PIRLNavPPOTrainer(PPOTrainer):
                 action_shape = (1,)
                 discrete_actions = True
 
-        self._setup_actor_critic_agent(ppo_cfg)
+        il_cfg = config.IL.BehaviorCloning
+        policy_cfg = config.POLICY
+        self._setup_actor_critic_agent(il_cfg)
 
         if self.agent.actor_critic.should_load_agent_state:
-            self.agent.load_state_dict(ckpt_dict["state_dict"])
+            self.agent.load_state_dict({
+                k.replace("model.", "actor_critic."): v
+                for k, v in ckpt_dict["state_dict"].items()
+            })
         self.actor_critic = self.agent.actor_critic
 
         observations = self.envs.reset()
         batch = batch_obs(
             observations, device=self.device, cache=self._obs_batching_cache
         )
-        constant = 414534
-        #constant = 9994
+        #constant = 414534
+        constant = 9994
 
         observations_mult = batch["semantic"] * constant
 
@@ -808,7 +741,7 @@ class PIRLNavPPOTrainer(PPOTrainer):
 
         test_recurrent_hidden_states = torch.zeros(
             self.config.NUM_ENVIRONMENTS,
-            self.actor_critic.num_recurrent_layers,
+            self.actor_critic.net.num_recurrent_layers,
             policy_cfg.STATE_ENCODER.hidden_size,
             device=self.device,
         )
@@ -848,6 +781,7 @@ class PIRLNavPPOTrainer(PPOTrainer):
                 number_of_eval_episodes = total_num_eps
 
         pbar = tqdm.tqdm(total=number_of_eval_episodes)
+        logger.info("Sampling actions deterministically...")
         self.actor_critic.eval()
         while (
             len(stats_episodes) < number_of_eval_episodes
@@ -856,19 +790,28 @@ class PIRLNavPPOTrainer(PPOTrainer):
             current_episodes = self.envs.current_episodes()
 
             with torch.no_grad():
+                prueba_test_recurrent_hidden_states = test_recurrent_hidden_states
                 (
-                    _,
                     actions,
-                    _,
                     test_recurrent_hidden_states,
                 ) = self.actor_critic.act(
                     batch,
                     test_recurrent_hidden_states,
                     prev_actions,
                     not_done_masks,
-                    deterministic=False,
+                    deterministic=True,
                 )
-
+                # batch["rgb"] = torch.zeros(2,480,640,3).to("cuda:0")
+                # (
+                #     actions,
+                #     test_recurrent_hidden_states,
+                # ) = self.actor_critic.act(
+                #     batch,
+                #     prueba_test_recurrent_hidden_states,
+                #     prev_actions,
+                #     not_done_masks,
+                #     deterministic=True,
+                # )
                 prev_actions.copy_(actions)  # type: ignore
             # NB: Move actions to CPU.  If CUDA tensors are
             # sent in to env.step(), that will create CUDA contexts
@@ -893,8 +836,8 @@ class PIRLNavPPOTrainer(PPOTrainer):
                 device=self.device,
                 cache=self._obs_batching_cache,
             )
-            constant = 414534
-            # constant = 9994
+            #constant = 414534
+            constant = 9994
 
             observations_mult = batch["semantic"] * constant
 
@@ -902,6 +845,7 @@ class PIRLNavPPOTrainer(PPOTrainer):
             rgb_matrix[:, :, :, 0] = (observations_mult[:, :, :, 0] >> 16) & 0xFF  # R
             rgb_matrix[:, :, :, 1] = (observations_mult[:, :, :, 0] >> 8) & 0xFF  # G
             rgb_matrix[:, :, :, 2] = observations_mult[:, :, :, 0] & 0xFF  # B
+
             batch["semantic_rgb"] = rgb_matrix
             batch = apply_obs_transforms_batch(batch, self.obs_transforms)  # type: ignore
 

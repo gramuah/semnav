@@ -85,7 +85,7 @@ _CONFIG.VERBOSE = True
 
 _CONFIG.BASE_TASK_CONFIG_PATH = "configs/tasks/objectnav_hm3d.yaml"
 
-_CONFIG.TRAINER_NAME = "pirlnav-ddppo"
+_CONFIG.TRAINER_NAME = "semnav-ddppo"
 _CONFIG.ENV_NAME = "SimpleRLEnv"
 _CONFIG.SENSORS = ["RGB_SENSOR"]
 

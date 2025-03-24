@@ -17,7 +17,7 @@ from habitat.utils.visualizations.utils import (
 from numpy import ndarray
 from torch import Tensor
 
-from pirlnav.policy.models.resnet_gn import ResNet
+from semnav.policy.models.resnet_gn import ResNet
 
 
 def load_encoder(encoder, path):

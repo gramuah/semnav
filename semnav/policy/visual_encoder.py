@@ -5,7 +5,7 @@ from habitat_baselines.rl.ddppo.policy.running_mean_and_var import RunningMeanAn
 from torch import nn as nn
 from torch.nn import functional as F
 
-from pirlnav.policy.models import resnet_gn as resnet
+from semnav.policy.models import resnet_gn as resnet
 
 
 class VisualEncoder(nn.Module):

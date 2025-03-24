@@ -3,7 +3,7 @@
 
 Code for our paper: [SemNav: Semantic Segmentation for Visual Semantic Navigation]().
 
-**Authors:** Rafael Flor Rodríguez-Rabadán, Carlos Gutiérrez Álvarez, Roberto Javier López Sastre.  
+**Authors:** [Rafael Flor Rodríguez-Rabadán](https://rflor01.github.io/), [Carlos Gutiérrez Álvarez](https://monke.es), [Roberto Javier López Sastre](https://gram.web.uah.es/people/rober/).  
 [Group Page](https://gram.web.uah.es/)
 
 ## Overview
@@ -16,14 +16,27 @@ Read more in the [paper](#).
 
 ---
 
-## Installation
+## Install locally
+
+To run our code you need a machine that runs Ubuntu in order to install all the dependencies. We have tested our code on Ubuntu 20.04, 22.04 and 24.04. The most easy way is to install miniconda (if you don't already have it). You can download it from [here](https://www.anaconda.com/docs/getting-started/miniconda/install#macos-linux-installation).
+
+Once you have installed miniconda, you can setup the environment by running the following script we prepared:
+
+```bash
+bash scripts/setup_environment.sh
+```
+
+If you want to install the dependencies manually, you can follow the instructions below.
+
+<details>
+<summary>Manual installation (Click to expand/collapse)</summary>
 
 Clone the repository and set up the environment:
 
 ```bash
-git clone https://github.com/example/semnav.git
-
+git clone https://github.com/gramuah/semnav.git
 conda create -n semnav python=3.9 cmake=3.18.0
+conda activate semnav
 ```
 
 ### Install Habitat-Sim
@@ -33,7 +46,13 @@ git clone --depth 1 --branch v0.2.2 https://github.com/facebookresearch/habitat-
 cd habitat-sim/
 pip install -r requirements.txt
 python setup.py install --headless
+cd ..
 
+```
+
+### Install torch
+
+```bash
 pip3 install torch torchvision torchaudio
 ```
 
@@ -41,28 +60,68 @@ pip3 install torch torchvision torchaudio
 
 ```bash
 pip install gym==0.22.0 urllib3==1.25.11 numpy==1.25.0 pillow==9.2.0
-git clone https://github.com/facebookresearch/habitat-lab.git
+git clone https://github.com/carlosgual/habitat-lab.git
 cd habitat-lab/
 python setup.py develop --install
-conda install protobuf  
+cd ..
 ```
+
+### Install other dependencies
+
+```bash 
+pip install wandb
+conda install protobuf
+```
+
+### Install semnav
+
+```bash
+pip insatll -e .
+```
+</details>
+
+---
+
+## Data setup
+
+We provide two datasets, **SemNav 40** and **SemNav 1630**, for leveraging semantic segmentation information:
+
+- **SemNav 1630**: Built using human-annotated semantic labels from [HM3D Semantics](https://github.com/facebookresearch/habitat-lab/tree/main/habitat/data/datasets/hm3d_semantics).
+- **SemNav 40**: Derived by mapping these annotations to the 40 categories of [NYUv2](https://cs.nyu.edu/~silberman/datasets/nyu_depth_v2.html).
+
+| Dataset      | Download Link |
+|-------------|--------------|
+| **SemNav 40**  | [Download](#) |
+| **SemNav 1630** | [Download](#) |
+
+
+Additionally, download the **ObjectNav HM3D episode dataset** from [this link](https://github.com/facebookresearch/habitat-lab/blob/main/DATASETS.md#task-datasets).
 
 ---
 
 ## Docker Setup
 
-### Build the Docker Image
+If you want to run the code in a Docker container (for example to run it into a compute server as we do), follow the instructions below. You will need a docker installation with [GPU support](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html). We also use rootless containers, which means that the container shares the same user as the host. That is why first of all you need to put your user name and user id in the [Dockerfile](docker/Dockerfile) (lines 42-43). You can get your user id by running `id -u`.
 
-Navigate to the directory containing the `Dockerfile` and execute:
+### Build the Docker Image
 
 ```bash
 docker build -t semnav:latest -f docker/Dockerfile .
 ```
 
+This builds the Docker image with the entrypoint prepared to run the [training script](scripts/launch_training.sh). You can modify the entrypoint to run other scripts, for example the [evaluation script](scripts/launch_eval.sh), but you will need to rebuild the image.
+
 ### Run the Docker Container
 
 ```bash
-docker run --gpus all -it --rm --name semnav_container semnav:latest
+docker run \ 
+  -v /home/your_username/local_path_to_your_data/:/home/your_username/code/data \ # mount the data folder
+  -v /home/your_username/local_path_to_your_code/semnav:/home/your_username/code \ # mount the code folder (so you can modify the code locally and still deploy it via docker)
+  --env NVIDIA_VISIBLE_DEVICES=5,6 \ # If you want to use specific GPUs on multi-GPU systems
+  --env WANDB_API_KEY=your_api_key \ # If you want to use wandb, if not ignore
+  --name semnav_container \
+  --runtime=nvidia \
+  semnav
 ```
 
 ### Access the Running Container
@@ -83,24 +142,7 @@ The Dockerfile sets up the complete environment, including:
 - Habitat-Sim and Habitat-Lab for simulation tasks
 - Essential Python libraries: PyTorch, torchvision, torchaudio
 
-Ensure the entry script `/home/your_username/entrypoint.sh` is present and executable.
-
----
-
-## Datasets
-
-We provide two datasets, **SemNav 40** and **SemNav 1630**, for leveraging semantic segmentation information:
-
-- **SemNav 1630**: Built using human-annotated semantic labels from [HM3D Semantics](https://github.com/facebookresearch/habitat-lab/tree/main/habitat/data/datasets/hm3d_semantics).
-- **SemNav 40**: Derived by mapping these annotations to the 40 categories of [NYUv2](https://cs.nyu.edu/~silberman/datasets/nyu_depth_v2.html).
-
-| Dataset      | Download Link |
-|-------------|--------------|
-| **SemNav 40**  | [Download](#) |
-| **SemNav 1630** | [Download](#) |
-
-
-Additionally, download the **ObjectNav HM3D episode dataset** from [this link](https://github.com/facebookresearch/habitat-lab/blob/main/DATASETS.md#task-datasets).
+Ensure the entry script [entrypoint.sh](docker/entrypoint.sh) is executable.
 
 ---
 
@@ -114,10 +156,10 @@ We provide multiple trained configurations. The **pretrained_ckpt** directory co
 
 ## Training
 
-To train a model from scratch, run:
+To train a model from scratch, run (with the conda environment activated):
 
 ```bash
-sbatch scripts/1-objectnav-il.sh objectnav_hm3d_hd
+bash scripts/launch_training.sh
 ```
 
 The training dataset is available in the [PirlNav repository](https://github.com/Ram81/pirlnav?tab=readme-ov-file).
@@ -139,10 +181,10 @@ Pretrained visual encoder weights can be downloaded from the [PirlNav repository
 
 ## Evaluation
 
-Run the evaluation with:
+Run the evaluation with (with the conda environment activated):
 
 ```bash
-sbatch scripts/1-objectnav-il-eval.sh /path/to/checkpoint
+bash scripts/launch_eval.sh
 ```
 
 To evaluate pretrained models, select a checkpoint from **pretrained_ckpt**.
