@@ -1,3 +1,4 @@
+![](imgs/SemNavimg.png)
 # SemNav: Semantic Segmentation for Visual Semantic Navigation
 
 Code for our paper: [SemNav: Semantic Segmentation for Visual Semantic Navigation]().
@@ -8,8 +9,6 @@ Code for our paper: [SemNav: Semantic Segmentation for Visual Semantic Navigatio
 ## Overview
 
 SemNav is a visual semantic navigation model that achieves successful navigations through imitation learning, using semantic segmentation images as input to the model.
-
-![SemNav Image](imgs/SemNavimg.png)
 
 This paradigm advances the state of the art in both simulated environments and real-world scenarios by leveraging scene information, reducing the domain gap between training in simulation and deployment in reality. Our findings demonstrate that using semantic segmentation significantly improves state-of-the-art results in the ObjectNav task, relying solely on imitation learning.
 
@@ -23,7 +22,6 @@ Clone the repository and set up the environment:
 
 ```bash
 git clone https://github.com/example/semnav.git
-git submodule update --init
 
 conda create -n semnav python=3.9 cmake=3.18.0
 ```
