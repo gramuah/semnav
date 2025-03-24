@@ -1,0 +1,63 @@
+BASE_TASK_CONFIG_PATH: "configs/tasks/objectnav_hm3d.yaml"
+CMD_TRAILING_OPTS: ["TASK_CONFIG.ENVIRONMENT.ITERATOR_OPTIONS.MAX_SCENE_REPEAT_STEPS", "50000"]
+ENV_NAME: "SimpleRLEnv"
+WANDB_ENABLED: True
+SIMULATOR_GPU_ID: 0
+TORCH_GPU_ID: 0
+VIDEO_OPTION: [disk]
+TENSORBOARD_DIR: "tb/onlysem1630catpretrainedckpt8"
+VIDEO_DIR: "vidonlysem1630catpretrainedckpt8"
+TEST_EPISODE_COUNT: -1
+EVAL_CKPT_PATH_DIR: "onlysem1630catpretrainedckpt8"
+NUM_ENVIRONMENTS: 16
+CHECKPOINT_FOLDER: "onlysem1630catpretrainedckpt8"
+TRAINER_NAME: "pirlnav-il"
+
+SENSORS: ["RGB_SENSOR","SEMANTIC_SENSOR"]
+#SENSORS: ["RGB_SENSOR",]
+#SENSORS: ["SEMANTIC_SENSOR"]
+NUM_UPDATES: 3200000000
+LOG_INTERVAL: 10
+NUM_CHECKPOINTS: 30000
+
+
+# Force PyTorch to be single threaded as
+# this improves performance considerably
+FORCE_TORCH_SINGLE_THREADED: True
+
+EVAL:
+  SPLIT: "val"
+
+IL:
+  POLICY:
+    name: "SEMANTIC_ObjectNavILMAEPolicy"
+  BehaviorCloning:
+#    lr: 0.00001
+#    encoder_lr: 0.00001
+#    use_lr_scheduler: True
+#    num_mini_batch: 2
+#    CYCLIC_LR:
+#      gamma: 0.99994
+#      multiplication_factor: 100
+#      step_size_up: 2000
+    num_steps: 64
+    lr: 0.001
+    encoder_lr: 0.001
+    num_mini_batch: 2
+
+
+RL:
+  SUCCESS_REWARD: 2.5
+  SLACK_REWARD: -1e-3
+  DDPPO:
+    force_distributed: True
+
+
+
+POLICY:
+  CRITIC:
+    no_critic: True
+  RGB_ENCODER:
+    pretrained_encoder: "data/visual_encoders/omnidata_DINO_02.pth"
+  SEMANTIC_RGB_ENCODER:
+    pretrained_encoder: "data/visual_encoders/omnidata_DINO_02.pth"
