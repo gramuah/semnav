@@ -1,18 +1,12 @@
 ![](imgs/SemNavimg.png)
 # SemNav: Semantic Segmentation for Visual Semantic Navigation
 
-Code for our paper: [SemNav: Semantic Segmentation for Visual Semantic Navigation]().
-
-**Authors:** Rafael Flor Rodríguez-Rabadán, Carlos Gutiérrez Álvarez, Roberto Javier López Sastre.  
-[Group Page](https://gram.web.uah.es/)
 
 ## Overview
 
 SemNav is a visual semantic navigation model that achieves successful navigations through imitation learning, using semantic segmentation images as input to the model.
 
 This paradigm advances the state of the art in both simulated environments and real-world scenarios by leveraging scene information, reducing the domain gap between training in simulation and deployment in reality. Our findings demonstrate that using semantic segmentation significantly improves state-of-the-art results in the ObjectNav task, relying solely on imitation learning.
-
-Read more in the [paper](#).
 
 ---
 
