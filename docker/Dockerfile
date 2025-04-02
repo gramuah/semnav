@@ -39,7 +39,7 @@ RUN ln -s /opt/cmake/bin/cmake /usr/local/bin/cmake
 RUN cmake --version
 
 # Add user
-RUN useradd -u 1000 --create-home your_username
+RUN useradd -u your_user_id --create-home your_username
 WORKDIR /home/your_username
 RUN mkdir code/
 

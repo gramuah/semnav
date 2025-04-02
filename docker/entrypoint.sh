@@ -1,6 +1,6 @@
 #!/bin/bash
 
-echo "Iniciando script de entrenamiento: $(date)"
+echo "Starting training script: $(date)"
 
 . activate habitat
 cd ~/code/ && pip install -e .

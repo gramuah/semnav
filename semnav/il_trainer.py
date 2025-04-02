@@ -52,15 +52,15 @@ from torch import nn as nn
 from torch.optim.lr_scheduler import CyclicLR
 from torch.optim.lr_scheduler import LambdaLR
 
-from pirlnav.algos.agent import DDPILAgent
-from pirlnav.algos.agent import Semantic_DDPILAgent
-from pirlnav.common.rollout_storage import RolloutStorage
+from semnav.algos.agent import DDPILAgent
+from semnav.algos.agent import Semantic_DDPILAgent
+from semnav.common.rollout_storage import RolloutStorage
 import cv2
 
 
 
 
-@baseline_registry.register_trainer(name="pirlnav-il")
+@baseline_registry.register_trainer(name="semnav-il")
 class ILEnvDDPTrainer(PPOTrainer):
     def __init__(self, config=None):
         super().__init__(config)

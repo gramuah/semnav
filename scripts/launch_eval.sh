@@ -11,7 +11,7 @@ CHECKPOINT_DIR="data/checkpoints/pirlnavwDINO31"
 EVAL_CKPT_PATH_DIR="data/checkpoints/pirlnavwDINO31"
 
 echo "In ObjectNav IL DDP"
-python -u -m run \
+python run.py \
     --exp-config $config \
     --run-type eval \
     TENSORBOARD_DIR $TENSORBOARD_DIR \
@@ -19,4 +19,4 @@ python -u -m run \
     NUM_UPDATES 50000 \
     NUM_ENVIRONMENTS 20 \
     RL.DDPPO.force_distributed True \
-    TASK_CONFIG.DATASET.DATA_PATH "$DATA_PATH/{split}/{split}.json.gz" \
+    TASK_CONFIG.DATASET.DATA_PATH "$DATA_PATH/{split}/{split}.json.gz"

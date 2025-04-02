@@ -30,8 +30,8 @@ SIMULATOR:
     MIN_DEPTH: 0.5
     MAX_DEPTH: 5.0
     POSITION: [0, 0.88, 0]
-  SCENE_DATASET: "data/scene_datasets/hm3d/hm3d_annotated_basis.scene_dataset_config.json"
-SCENE_DATASET: "data/scene_datasets/hm3d/hm3d_annotated_basis.scene_dataset_config.json"
+  SCENE_DATASET: "data/scene_datasets/40cateogires_datasets/hm3d/hm3d_annotated_basis.scene_dataset_config.json"
+SCENE_DATASET: "data/scene_datasets/40cateogires_datasets/hm3d/hm3d_annotated_basis.scene_dataset_config.json"
 TASK:
   TYPE: ObjectNav-v2
   POSSIBLE_ACTIONS: ["STOP", "MOVE_FORWARD", "TURN_LEFT", "TURN_RIGHT", "LOOK_UP", "LOOK_DOWN"]
@@ -61,6 +61,6 @@ TASK:
 DATASET:
   TYPE: ObjectNav-v2
   SPLIT: train
-  DATA_PATH: "data/datasets/objectnav/objectnav_hm3d/objectnav_hm3d_v1/{split}/{split}.json.gz"
-  SCENES_DIR: "data/scene_datasets"
+  DATA_PATH: "data/datasets/objectnav/objectnav_hm3d_v1/{split}/{split}.json.gz"
+  SCENES_DIR: "data/scene_datasets/40categories_datasets"
 

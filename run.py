@@ -14,7 +14,7 @@ from habitat import logger
 from habitat.config import Config
 from habitat_baselines.common.baseline_registry import baseline_registry
 
-from pirlnav.config import get_config
+from semnav.config import get_config
 from habitat_baselines.rl.ddppo.ddp_utils import load_resume_state
 
 def main():

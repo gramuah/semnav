@@ -19,7 +19,7 @@ from habitat.datasets.pointnav.pointnav_dataset import (
 )
 from habitat.tasks.nav.object_nav_task import ObjectGoal, ObjectViewLocation
 
-from pirlnav.task.object_nav_task import ObjectGoalNavEpisode, ReplayActionSpec
+from semnav.task.object_nav_task import ObjectGoalNavEpisode, ReplayActionSpec
 
 
 @registry.register_dataset(name="ObjectNav-v2")

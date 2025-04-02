@@ -10,7 +10,7 @@ from habitat import logger
 from habitat_baselines.rl.ddppo.policy.running_mean_and_var import RunningMeanAndVar
 from torch import Tensor
 
-from pirlnav.policy.models import resnet
+from semnav.policy.models import resnet
 
 
 class Flatten(nn.Module):

@@ -20,7 +20,7 @@ from habitat_baselines.common.obs_transformers import (
     apply_obs_transforms_obs_space,
     get_active_obs_transforms,
 )
-from pirlnav.common.RLrollout_storage import RolloutStorage
+from semnav.common.rollout_storage import RolloutStorage
 from habitat_baselines.common.tensorboard_utils import TensorboardWriter, get_writer
 from habitat_baselines.rl.ddppo.ddp_utils import (
     EXIT,
@@ -41,12 +41,12 @@ from habitat_baselines.utils.common import (
     is_continuous_action_space,
 )
 
-from pirlnav.algos.ppo import DDPPO, PPO
-from pirlnav.utils.lr_scheduler import PIRLNavLRScheduler
+from semnav.algos.ppo import DDPPO, PPO
+from semnav.utils.lr_scheduler import PIRLNavLRScheduler
 
 
-@baseline_registry.register_trainer(name="pirlnav-ddppo")
-@baseline_registry.register_trainer(name="pirlnav-ppo")
+@baseline_registry.register_trainer(name="semnav-ddppo")
+@baseline_registry.register_trainer(name="semnav-ppo")
 class PIRLNavPPOTrainer(PPOTrainer):
     def __init__(self, config=None):
         super().__init__(config)

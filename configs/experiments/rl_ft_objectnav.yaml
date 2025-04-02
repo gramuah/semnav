@@ -1,0 +1,76 @@
+BASE_TASK_CONFIG_PATH: "configs/tasks/objectnav_hm3d.yaml"
+CMD_TRAILING_OPTS: ["TASK_CONFIG.ENVIRONMENT.ITERATOR_OPTIONS.MAX_SCENE_REPEAT_STEPS", "100000"]
+ENV_NAME: "SimpleRLEnv"
+SIMULATOR_GPU_ID: 0
+TORCH_GPU_ID: 0
+WANDB_ENABLED: True
+VIDEO_OPTION: []
+TENSORBOARD_DIR: "tb/check_eval_ckpt_bueno_rafa"
+VIDEO_DIR: "vidRLFT_Change_lr"
+TEST_EPISODE_COUNT: -1
+EVAL_CKPT_PATH_DIR: "data/checkpoints/semnav_bueno_rlft/ckpt.35.pth"
+NUM_ENVIRONMENTS: 4
+CHECKPOINT_FOLDER: "data/checkpoints/semnav_bueno_rlft/ckpt.35.pth"
+TRAINER_NAME: "semnav-ppo"
+SENSORS: ["RGB_SENSOR","SEMANTIC_SENSOR"]
+NUM_UPDATES: 3200000000
+LOG_INTERVAL: 10
+NUM_CHECKPOINTS: 30000
+# Force PyTorch to be single threaded as
+# this improves performance considerably
+FORCE_TORCH_SINGLE_THREADED: True
+
+EVAL:
+  SPLIT: "val"
+  USE_CKPT_CONFIG: False
+
+RL:
+  SUCCESS_REWARD: 2.5
+  SLACK_REWARD: -1e-3
+
+  POLICY:
+    name: "SEMANTIC_RGB_ObjectNavILMAEPolicy"
+
+  Finetune:
+    start_actor_warmup_at: 850
+    start_actor_update_at: 1700
+    start_critic_warmup_at: 340
+    start_critic_update_at: 1360
+    lr: 1.5e-6
+
+
+  PPO:
+    # ppo params
+    clip_param: 0.2
+    ppo_epoch: 4
+    value_loss_coef: 0.5
+    entropy_coef: 0.01
+    lr: 2.5e-5
+    eps: 1e-5
+    max_grad_norm: 0.2
+    num_steps: 64
+    use_gae: True
+    gamma: 0.99
+    tau: 0.95
+    use_linear_clip_decay: False
+    reward_window_size: 50
+
+    use_normalized_advantage: False
+
+    hidden_size: 512
+
+  DDPPO:
+    sync_frac: 0.6
+    # The PyTorch distributed backend to use
+    distrib_backend: NCCL
+    # Visual encoder babone
+#    pretrained_weights: False
+    # Initialize with pretrained weights
+    pretrained: False
+    # Initialize just the visual encoder backbone with pretrained weights
+    pretrained_encoder: False
+    # Whether or not the visual encoder backbone will be trained.
+    train_encoder: True
+    # Whether or not to reset the critic linear layer
+    reset_critic: True
+    force_distributed: True
