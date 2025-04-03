@@ -81,18 +81,19 @@ pip insatll -e .
 
 ## Data setup
 
-We provide two datasets, **SemNav 40** and **SemNav 1630**, for leveraging semantic segmentation information:
+
+We provide two datasets, **SemNav 40** and **SemNav 1630**, for leveraging semantic segmentation information. These datasets will be available after the publication of the paper.
 
 - **SemNav 1630**: Built using human-annotated semantic labels from [HM3D Semantics](https://github.com/facebookresearch/habitat-lab/tree/main/habitat/data/datasets/hm3d_semantics).
 - **SemNav 40**: Derived by mapping these annotations to the 40 categories of [NYUv2](https://cs.nyu.edu/~silberman/datasets/nyu_depth_v2.html).
 
 | Dataset      | Download Link |
-|-------------|--------------|
-| **SemNav 40**  | [Download](#) |
-| **SemNav 1630** | [Download](#) |
-
+|--------------|----------------|
+| **SemNav 40**  | Available after publication |
+| **SemNav 1630** | Available after publication |
 
 Additionally, download the **ObjectNav HM3D episode dataset** from [this link](https://github.com/facebookresearch/habitat-lab/blob/main/DATASETS.md#task-datasets).
+
 
 ---
 
@@ -145,9 +146,12 @@ Ensure the entry script [entrypoint.sh](docker/entrypoint.sh) is executable.
 
 ## Pretrained Checkpoints
 
-We provide multiple trained configurations. The **pretrained_ckpt** directory contains checkpoints for the **SemNav 40** dataset in two setups:
+We provide multiple trained configurations. The **pretrained_ckpt** directory contains checkpoints for the **SemNav 40** dataset in three setups:
 - **Only Semantic**
 - **Semantic+RGB**
+- **Semantic+RGB+RL**
+
+Checkpoints will be available after publication.
 
 ---
 
