@@ -192,5 +192,5 @@ To evaluate pretrained models, select a checkpoint from **pretrained_ckpt**.
 
 ---
 
-For further information, refer to our [paper](#) or visit our [Group Page](https://gram.web.uah.es/).
+
 
