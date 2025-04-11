@@ -4,13 +4,13 @@ ENV_NAME: "SimpleRLEnv"
 WANDB_ENABLED: True
 SIMULATOR_GPU_ID: 0
 TORCH_GPU_ID: 0
-VIDEO_OPTION: [disk]
-TENSORBOARD_DIR: "tb/onlysem1630catpretrainedckpt8"
+VIDEO_OPTION: []
+TENSORBOARD_DIR: "tb/check_RGBS_pretrained_seeds"
 VIDEO_DIR: "vidonlysem1630catpretrainedckpt8"
 TEST_EPISODE_COUNT: -1
-EVAL_CKPT_PATH_DIR: "onlysem1630catpretrainedckpt8"
-NUM_ENVIRONMENTS: 16
-CHECKPOINT_FOLDER: "onlysem1630catpretrainedckpt8"
+EVAL_CKPT_PATH_DIR: "data/checkpoints/RGBS_Pretrained.pth"
+NUM_ENVIRONMENTS: 4
+CHECKPOINT_FOLDER: "data/checkpoints/RGBS_Pretrained.pth"
 TRAINER_NAME: "semnav-il"
 
 SENSORS: ["RGB_SENSOR","SEMANTIC_SENSOR"]
@@ -27,10 +27,11 @@ FORCE_TORCH_SINGLE_THREADED: True
 
 EVAL:
   SPLIT: "val"
+  USE_CKPT_CONFIG: False
 
 IL:
   POLICY:
-    name: "SEMANTIC_ObjectNavILMAEPolicy"
+    name: "SEMANTIC_RGB_ObjectNavILMAEPolicy"
   BehaviorCloning:
 #    lr: 0.00001
 #    encoder_lr: 0.00001
