@@ -6,7 +6,7 @@
 SemNav is a visual semantic navigation model ready to be deployed into any robot. It achieves successful object goal navigations using mainly semantic segmentation information.
 
 <p align="center">
-<img src="./resources/graphical_abstract_semnav.png"  width="800px">
+<img src="./imgs/graphical_abstract_semnav.png"  width="800px">
 </p>
 
 In this repository we release the SemNav dataset, code and trained models detailed in our <a href="https://arxiv.org/abs/2506.01418"> [paper]</a>.
@@ -14,7 +14,7 @@ In this repository we release the SemNav dataset, code and trained models detail
 **If you use any content of this repo for your work, please cite the following bib entry:**
 
     @article{semnav,
-    author={Blanco-Fern{\'a}ndez, Eduardo and Guti{\'e}rrez-{\'A}lvarez, Carlos and Nasri, Nadia and Maldonado-Basc{\'o}n, Saturnino and L{\'o}pez-Sastre, Roberto J.},
+    author={Flor-Rodr{\'i}guez, Rafael and Guti{\'e}rrez-{\'A}lvarez, Carlos and Acevedo-Rodr{\'i}guez, Francisco~J. and Lafuente-Arroyo, Sergio and L{\'o}pez-Sastre, Roberto~J.},
     title={SEMNAV: A Semantic Segmentation-Driven Approach to Visual Semantic Navigation},
     journal={ArXiv},
     year={2025},
