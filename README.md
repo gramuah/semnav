@@ -88,8 +88,8 @@ We provide two datasets, **SemNav 40** and **SemNav 1630**, for leveraging seman
 
 | Dataset      | Download Link |
 |-------------|--------------|
-| **SemNav 40**  | [Download](#) |
-| **SemNav 1630** | [Download](#) |
+| **SemNav 40**  | [Download](https://universidaddealcala-my.sharepoint.com/:u:/g/personal/robertoj_lopez_uah_es/Ef8ICu5voytOgsDE0Pvxhp4B-CboxtNUZqHdOl28iz9lIQ?e=Aod9PZ&xsdata=MDV8MDJ8cmFmYWVsLmZsb3JAdWFoLmVzfDY0ZWNmZmVjZDdlYjQ1ZWMzMWMyMDhkZGQwMGUzMjUxfGNlZDJjNTUyN2QxZjQ3MzFhYTNhMmYwZWM5NjI5ZTI2fDF8MHw2Mzg4OTU0ODE1ODYxMDE2ODl8VW5rbm93bnxUV0ZwYkdac2IzZDhleUpGYlhCMGVVMWhjR2tpT25SeWRXVXNJbFlpT2lJd0xqQXVNREF3TUNJc0lsQWlPaUpYYVc0ek1pSXNJa0ZPSWpvaVRXRnBiQ0lzSWxkVUlqb3lmUT09fDB8fHw%3d&sdata=SEtqb0R3bVpaMlJ6V1NnMzF1WFhZVW5yOW9FVThqRlUwa2RtMitWUUhjdz0%3d) |
+| **SemNav 1630** | [Download](https://universidaddealcala-my.sharepoint.com/:u:/g/personal/robertoj_lopez_uah_es/ESrWb5Q0aqNJsv3VSMyD_VIB1cDYzZT8l7ZBr2P1Tz6sdg?e=byeWsG&xsdata=MDV8MDJ8cmFmYWVsLmZsb3JAdWFoLmVzfDY0ZWNmZmVjZDdlYjQ1ZWMzMWMyMDhkZGQwMGUzMjUxfGNlZDJjNTUyN2QxZjQ3MzFhYTNhMmYwZWM5NjI5ZTI2fDF8MHw2Mzg4OTU0ODE1ODYxMTgzMTV8VW5rbm93bnxUV0ZwYkdac2IzZDhleUpGYlhCMGVVMWhjR2tpT25SeWRXVXNJbFlpT2lJd0xqQXVNREF3TUNJc0lsQWlPaUpYYVc0ek1pSXNJa0ZPSWpvaVRXRnBiQ0lzSWxkVUlqb3lmUT09fDB8fHw%3d&sdata=QkRpbWwzNjMrWEJKYVBYWldldHh0ZWFDTG5wR3dBMFBNZ3JwajlBSisvTT0%3d) |
 
 
 Additionally, download the **ObjectNav HM3D episode dataset** from [this link](https://github.com/facebookresearch/habitat-lab/blob/main/DATASETS.md#task-datasets).
@@ -145,9 +145,18 @@ Ensure the entry script [entrypoint.sh](docker/entrypoint.sh) is executable.
 
 ## Pretrained Checkpoints
 
-We provide multiple trained configurations. The **pretrained_ckpt** directory contains checkpoints for the **SemNav 40** dataset in two setups:
-- **Only Semantic**
-- **Semantic+RGB**
+We provide multiple trained configurations. We provide checkpoints for the **SemNav 40** dataset in three setups:
+
+- **RGBS (IL)**: Trained using imitation learning (IL) with RGB and semantic segmentation inputs.
+- **RGBS (IL+RL)**: Trained using a combination of imitation learning (IL) and reinforcement learning (RL) with RGB and semantic segmentation inputs.
+- **OS**: Trained using only semantic segmentation inputs.
+
+| Configuration      | Description                                   | Download Link      |
+|--------------------|-----------------------------------------------|--------------------|
+| **RGBS (IL)**      | RGB + Semantic Segmentation (IL)             | [Download](https://universidaddealcala-my.sharepoint.com/:u:/g/personal/robertoj_lopez_uah_es/EV-D3D_jAVRFv8ixe8svXUgBaA0rFbHJIlOXd_B7e7uKiQ?e=WpIGvd&xsdata=MDV8MDJ8cmFmYWVsLmZsb3JAdWFoLmVzfDY0ZWNmZmVjZDdlYjQ1ZWMzMWMyMDhkZGQwMGUzMjUxfGNlZDJjNTUyN2QxZjQ3MzFhYTNhMmYwZWM5NjI5ZTI2fDF8MHw2Mzg4OTU0ODE1ODYwMTM0Mjd8VW5rbm93bnxUV0ZwYkdac2IzZDhleUpGYlhCMGVVMWhjR2tpT25SeWRXVXNJbFlpT2lJd0xqQXVNREF3TUNJc0lsQWlPaUpYYVc0ek1pSXNJa0ZPSWpvaVRXRnBiQ0lzSWxkVUlqb3lmUT09fDB8fHw%3d&sdata=QWhzRW9McEkxMEJzYVRGZjd5NHJlZDgzRlpVaTZMVStMdzZoYXltWW1DST0%3d)      |
+| **RGBS (IL+RL)**   | RGB + Semantic Segmentation (IL + RL)        | [Download](https://universidaddealcala-my.sharepoint.com/:u:/g/personal/robertoj_lopez_uah_es/EREVwINNOpNJtF0RNVik8usB2hnBgbpY-q9burQZ6TD6TQ?e=HiF5PR&xsdata=MDV8MDJ8cmFmYWVsLmZsb3JAdWFoLmVzfDY0ZWNmZmVjZDdlYjQ1ZWMzMWMyMDhkZGQwMGUzMjUxfGNlZDJjNTUyN2QxZjQ3MzFhYTNhMmYwZWM5NjI5ZTI2fDF8MHw2Mzg4OTU0ODE1ODYwNTMyMjF8VW5rbm93bnxUV0ZwYkdac2IzZDhleUpGYlhCMGVVMWhjR2tpT25SeWRXVXNJbFlpT2lJd0xqQXVNREF3TUNJc0lsQWlPaUpYYVc0ek1pSXNJa0ZPSWpvaVRXRnBiQ0lzSWxkVUlqb3lmUT09fDB8fHw%3d&sdata=aXBya21YSDJjTE1PV01xNitVWWVvdFFxM2VvTVlJMWVzY0d6TnZUUG9acz0%3d)      |
+| **OS**             | Only Semantic Segmentation                   | [Download](https://universidaddealcala-my.sharepoint.com/:u:/g/personal/robertoj_lopez_uah_es/EUxK0x3sBMdOiW1zyqzpdzQBeexhvLQKWznjJF4ExLP4wA?e=iXGLy5&xsdata=MDV8MDJ8cmFmYWVsLmZsb3JAdWFoLmVzfDY0ZWNmZmVjZDdlYjQ1ZWMzMWMyMDhkZGQwMGUzMjUxfGNlZDJjNTUyN2QxZjQ3MzFhYTNhMmYwZWM5NjI5ZTI2fDF8MHw2Mzg4OTU0ODE1ODYwODA2Njh8VW5rbm93bnxUV0ZwYkdac2IzZDhleUpGYlhCMGVVMWhjR2tpT25SeWRXVXNJbFlpT2lJd0xqQXVNREF3TUNJc0lsQWlPaUpYYVc0ek1pSXNJa0ZPSWpvaVRXRnBiQ0lzSWxkVUlqb3lmUT09fDB8fHw%3d&sdata=RjloU2pqY09JZVpZS3BtcGpZYTduSzR4RlY0UmIyeEt4YVVrV2Jtb3pqST0%3d)      |
+
 
 ---
 
