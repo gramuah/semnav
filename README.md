@@ -1,13 +1,29 @@
 ![](imgs/SemNavimg.png)
-# SemNav: Semantic Segmentation for Visual Semantic Navigation
-
-Code for our paper.
+# SemNav: A Semantic Segmentation-Driven Approach to Visual Semantic Navigation
 
 ## Overview
 
-SemNav is a visual semantic navigation model that achieves successful navigations through imitation learning, using semantic segmentation images as input to the model.
+SemNav is a visual semantic navigation model ready to be deployed into any robot. It achieves successful object goal navigations using mainly semantic segmentation information.
 
-This paradigm advances the state of the art in both simulated environments and real-world scenarios by leveraging scene information, reducing the domain gap between training in simulation and deployment in reality. Our findings demonstrate that using semantic segmentation significantly improves state-of-the-art results in the ObjectNav task, relying solely on imitation learning.
+<p align="center">
+<img src="./imgs/graphical_abstract_semnav.png"  width="800px">
+</p>
+
+In this repository we release the SemNav dataset, code and trained models detailed in our <a href="https://arxiv.org/abs/2506.01418"> [paper]</a>.
+
+**If you use any content of this repo for your work, please cite the following bib entry:**
+
+    @article{semnav,
+    author={Flor-Rodr{\'i}guez, Rafael and Guti{\'e}rrez-{\'A}lvarez, Carlos and Acevedo-Rodr{\'i}guez, Francisco~J. and Lafuente-Arroyo, Sergio and L{\'o}pez-Sastre, Roberto~J.},
+    title={SEMNAV: A Semantic Segmentation-Driven Approach to Visual Semantic Navigation},
+    journal={ArXiv},
+    year={2025},
+    month={June},
+    day={02},    
+    doi={10.48550/arXiv.2506.01418},
+    url={https://doi.org/10.48550/arXiv.2506.01418}
+    }    
+
 
 
 
