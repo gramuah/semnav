@@ -199,6 +199,22 @@ configs/experiments/il_objectnav.yaml
 
 Pretrained visual encoder weights can be downloaded from the [PirlNav repository](https://github.com/Ram81/pirlnav?tab=readme-ov-file).
 
+### Our Imitation Learning training parameters
+| **Parameter**                     | **Value**               |
+|-----------------------------------|--------------------------|
+| Number of GPUs                    | 8                        |
+| Number of environments per GPU    | 16                       |
+| Rollout length                    | 64                       |
+| Number of mini-batches per epoch  | 2                        |
+| Optimizer                         | Adam                     |
+| Learning rate scheduler           | Cyclic LR (exp_range)    |
+| Base learning rate                | 1×10⁻⁵                   |
+| Maximum learning rate             | 1×10⁻³                   |
+| Step size up                      | 2000                     |
+| Exponential decay factor (γ)      | 0.99994                  |
+| DDPIL sync fraction               | 0.6                      |
+
+
 ---
 
 ## Evaluation
