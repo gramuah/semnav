@@ -26,7 +26,7 @@ NUM_CHECKPOINTS: 30000
 ##
 ADD_NOISE: False
 
-USE_ESANET: True
+USE_ESANET: False
 
 # Force PyTorch to be single threaded as
 # this improves performance considerably
