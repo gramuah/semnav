@@ -178,11 +178,14 @@ class SemanticILAgent(nn.Module):
         wd: Optional[float] = None,
         optimizer: Optional[str] = "AdamW",
         entropy_coef: Optional[float] = 0.0,
+        semantic_constant: Optional[int] = 414534,
     ) -> None:
 
         super().__init__()
 
         self.contador = 0
+
+        self.semantic_constant = semantic_constant
 
         self.actor_critic = actor_critic
 
@@ -242,18 +245,8 @@ class SemanticILAgent(nn.Module):
 
 
         for batch in data_generator:
-           # for image in batch["observations"]["semantic_rgb"]:
-           #     cv2.imshow('Logo OpenCV',image.detach().cpu().numpy())
-           #     cv2.waitKey(500)
 
-            # Reshape to do in a single forward pass for all steps
-
-            constant = 414534
-            #constant = 9994
-
-            #print(batch["observations"]["rgb"])
-            #print(torch.any(batch["observations"]["semantic"]))
-            observations_mult = batch["observations"]["semantic"]*constant
+            observations_mult = batch["observations"]["semantic"]*self.semantic_constant
 
 
             rgb_matrix = torch.zeros((observations_mult.size(0), 480, 640, 3), dtype=torch.uint8, device=observations_mult.device)

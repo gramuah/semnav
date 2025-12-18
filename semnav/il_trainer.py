@@ -52,19 +52,371 @@ from torch import nn as nn
 from torch.optim.lr_scheduler import CyclicLR
 from torch.optim.lr_scheduler import LambdaLR
 
-from semnav.algos.agent import DDPILAgent
-from semnav.algos.agent import Semantic_DDPILAgent
-from semnav.common.rollout_storage import RolloutStorage
+
+from pirlnav.algos.agent import DDPILAgent
+from pirlnav.algos.agent import Semantic_DDPILAgent
+from pirlnav.common.rollout_storage import RolloutStorage
 import cv2
+import sys
+from types import SimpleNamespace
+from PIL import Image
+sys.path.append("/home/rafa/dgx_repositorios/semnav/ESANet")
+from ESANet.src.prepare_data import prepare_data
+from src.build_model import build_model
+from src.args import ArgumentParserRGBDSegmentation
+from src.prepare_data import prepare_data
+import torch.nn.functional as F
+from contextlib import contextmanager
+import matplotlib.pyplot as plt
+
+import pynvml
+
+@contextmanager
+def measure_resources():
+    """Context manager para medir tiempo, memoria GPU, uso de GPU y potencia"""
+    # Inicializar NVML para potencia
+    power_samples = []
+    try:
+        pynvml.nvmlInit()
+        handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+        power_available = True
+    except:
+        power_available = False
+
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+        torch.cuda.reset_peak_memory_stats()  # Reset peak tracking
+        mem_before = torch.cuda.memory_allocated()
+        start_event = torch.cuda.Event(enable_timing=True)
+        end_event = torch.cuda.Event(enable_timing=True)
+        start_event.record()
+
+    wall_start = time.time()
+
+    if power_available:
+        try:
+            power_samples.append(pynvml.nvmlDeviceGetPowerUsage(handle) / 1000.0)
+        except:
+            pass
+
+    yield
+
+    if power_available:
+        try:
+            power_samples.append(pynvml.nvmlDeviceGetPowerUsage(handle) / 1000.0)
+        except:
+            pass
+
+    wall_time = time.time() - wall_start
+
+    if torch.cuda.is_available():
+        end_event.record()
+        torch.cuda.synchronize()
+        gpu_time = start_event.elapsed_time(end_event) / 1000.0
+        mem_after = torch.cuda.memory_allocated()
+        mem_delta = mem_after - mem_before
+        mem_peak = torch.cuda.max_memory_allocated() - mem_before  # Memoria adicional usada desde el reset
+
+        power_info = ""
+        if power_samples:
+            avg_power = sum(power_samples) / len(power_samples)
+            power_info = f", power={avg_power:.2f}W"
+
+        print(f"Resources: wall={wall_time:.4f}s, "
+              f"gpu={gpu_time:.4f}s, "
+              f"mem_delta={mem_delta / (1024**2):.2f}MB, "
+              f"mem_peak_used={mem_peak / (1024**2):.2f}MB{power_info}")
+
+    if power_available:
+        pynvml.nvmlShutdown()
+
+
+def classes_to_semantic_rgb(semantic_classes, sem_constant):
+    """
+    Convierte clases semánticas a tensor RGB semántico.
+
+    Args:
+        semantic_classes: Tensor (B, H, W, 1) con clases semánticas
+        constant: Constante para la conversión (e.g., 414534)
+
+    Returns:
+        Tensor (B, H, W, 3) RGB semántico
+    """
+    device = semantic_classes.device
+
+    # Multiplicar las clases por la constante
+    semantic_int = (semantic_classes.squeeze(-1).long() * sem_constant)
+
+    # Extraer componentes RGB usando operaciones de bits
+    rgb_tensor = torch.stack([
+        (semantic_int >> 16) & 0xFF,  # R
+        (semantic_int >> 8) & 0xFF,  # G
+        semantic_int & 0xFF  # B
+    ], dim=-1).float()
+
+    return rgb_tensor
+
+def semantic_rgb_to_classes(semantic_rgb_tensor, sem_constant):
+    """
+    Convierte tensor RGB semántico a clases originales.
+
+    Args:
+        semantic_rgb_tensor: Tensor (B, H, W, 3) RGB semántico
+
+    Returns:
+        Tensor (B, H, W, 1) con clases semánticas
+    """
+    device = semantic_rgb_tensor.device
+
+    # Reconstruir el valor entero desde RGB
+    semantic_int = (
+            (semantic_rgb_tensor[..., 0].long() << 16) |
+            (semantic_rgb_tensor[..., 1].long() << 8) |
+            semantic_rgb_tensor[..., 2].long()
+    )
+
+    # Dividir por la constante para obtener las clases
+    semantic_classes = (semantic_int // sem_constant).unsqueeze(-1)  # (B, H, W, 1)
+
+    return semantic_classes
+
+
+def add_semantic_class_confusion(semantic_tensor, prob=0.1, num_classes=40, sem_constant=414534):
+    """
+    Confunde categorías semánticas completas con probabilidad dada (optimizado para GPU).
+
+    Args:
+        semantic_tensor: Tensor (B, H, W, 1) con clases semánticas
+        prob: Probabilidad de confusión por clase (0.0 a 1.0)
+        num_classes: Número total de clases (default 40)
+
+    Returns:
+        Tensor RGB (B, H, W, 3)
+    """
+    device = semantic_tensor.device
+    B, H, W, _ = semantic_tensor.shape
+    semantic_float = semantic_tensor.float().squeeze(-1).clone()  # (B, H, W)
+
+    # Vectorizado: obtener clases únicas por batch
+    for b in range(B):
+        unique_classes = torch.unique(semantic_float[b])
+
+        # Generar decisiones de confusión para todas las clases a la vez
+        confusion_decisions = torch.rand(len(unique_classes), device=device) < prob
+
+        # Filtrar clases a confundir (excluir clase 0)
+        classes_to_confuse = unique_classes[(unique_classes != 0) & confusion_decisions]
+
+        if len(classes_to_confuse) == 0:
+            continue
+
+        # Generar nuevas clases aleatorias (excluir 0 y la clase original)
+        new_classes = torch.randint(1, num_classes + 1, (len(classes_to_confuse),), device=device).float()
+
+        # Crear máscara y reemplazar en una sola operación
+        for old_class, new_class in zip(classes_to_confuse, new_classes):
+            # Asegurar que new_class != old_class
+            while new_class == old_class:
+                new_class = torch.randint(1, num_classes + 1, (1,), device=device).float().item()
+
+            mask = (semantic_float[b] == old_class)
+            semantic_float[b][mask] = float(new_class)  # Conversión explícita a float
+
+    # Conversión a RGB (operaciones vectorizadas en GPU)
+    semantic_result_int = semantic_float.unsqueeze(-1).to(torch.int32)
+    observations_mult = semantic_result_int * sem_constant
+
+    # Operación de bits optimizada
+    rgb_matrix = torch.stack([
+        (observations_mult[:, :, :, 0] >> 16) & 0xFF,
+        (observations_mult[:, :, :, 0] >> 8) & 0xFF,
+        observations_mult[:, :, :, 0] & 0xFF
+    ], dim=-1).float()
+
+    return rgb_matrix
 
 
 
+def add_semantic_class_blobs_perlin(semantic_tensor, num_blobs_range=(1, 10), blob_scale=50, sem_constant=414534):
+    """
+    Añade manchas grandes y localizadas en pocos puntos de la imagen.
+    """
+    device = semantic_tensor.device
+    B, H, W, _ = semantic_tensor.shape
+    semantic_float = semantic_tensor.float().clone()
 
-@baseline_registry.register_trainer(name="semnav-il")
+    # Generar número de manchas para cada batch
+    num_blobs = torch.randint(num_blobs_range[0], num_blobs_range[1] + 1, (B,), device=device)
+    max_blobs = num_blobs.max().item()
+
+    # Pre-generar todas las clases aleatorias
+    random_classes = torch.randint(1, 41, (B, max_blobs), device=device)
+
+    # Generar centros aleatorios para cada mancha
+    center_y = torch.randint(0, H, (B, max_blobs), device=device)
+    center_x = torch.randint(0, W, (B, max_blobs), device=device)
+
+    # Crear grids de coordenadas
+    yy, xx = torch.meshgrid(
+        torch.arange(H, device=device),
+        torch.arange(W, device=device),
+        indexing='ij'
+    )
+
+    # Aplicar manchas localizadas
+    for blob_idx in range(max_blobs):
+        valid_mask = (num_blobs > blob_idx).float().view(B, 1, 1)
+
+        for b in range(B):
+            if valid_mask[b, 0, 0] > 0:
+                # Centro de esta mancha
+                cy = center_y[b, blob_idx]
+                cx = center_x[b, blob_idx]
+
+                # Generar ruido localizado solo alrededor del centro
+                local_size = blob_scale * 2
+                y_start = max(0, cy - local_size)
+                y_end = min(H, cy + local_size)
+                x_start = max(0, cx - local_size)
+                x_end = min(W, cx + local_size)
+
+                local_h = y_end - y_start
+                local_w = x_end - x_start
+
+                # Generar ruido solo en la región local
+                noise = torch.randn((1, 1, local_h // 4, local_w // 4), device=device)
+                noise = F.interpolate(noise, size=(local_h, local_w), mode='bilinear', align_corners=False)
+
+                # Suavizar
+                kernel_size = max(blob_scale // 3, 3)
+                if kernel_size % 2 == 0:
+                    kernel_size += 1
+                noise = F.avg_pool2d(noise, kernel_size=kernel_size, stride=1, padding=kernel_size // 2)
+
+                # Normalizar
+                noise = noise.squeeze()
+                noise = (noise - noise.min()) / (noise.max() - noise.min() + 1e-8)
+
+                # Crear máscara con umbral alto para manchas más definidas
+                threshold = 0.6  # Umbral más alto = manchas más pequeñas y definidas
+                blob_mask = (noise > threshold).float()
+
+                # Aplicar la mancha solo en la región local
+                current_class = random_classes[b, blob_idx].float()
+                semantic_float[b, y_start:y_end, x_start:x_end, 0] = (
+                    semantic_float[b, y_start:y_end, x_start:x_end, 0] * (1 - blob_mask) +
+                    current_class * blob_mask
+                )
+
+    # Conversión a RGB
+    semantic_result_int = semantic_float.to(torch.int32)
+    observations_mult = semantic_result_int * sem_constant
+
+    rgb_matrix = torch.stack([
+        (observations_mult[:, :, :, 0] >> 16) & 0xFF,
+        (observations_mult[:, :, :, 0] >> 8) & 0xFF,
+        observations_mult[:, :, :, 0] & 0xFF
+    ], dim=-1).float()
+
+    return rgb_matrix
+
+
+
+def add_semantic_noise_with_true_adjacent(semantic_tensor, sigma=1.5, warp_strength=5.0, neighborhood=3, sem_constant=414534):
+    """
+    Mezcla bordes solo con clases adyacentes reales.
+    """
+    device = semantic_tensor.device
+    B, H, W, _ = semantic_tensor.shape
+    semantic_float = semantic_tensor.float().permute(0,3,1,2)  # (B,1,H,W)
+
+    # --- (1) Deformación espacial como antes ---
+    noise = torch.randn((B,2,H//16,W//16),device=device)*warp_strength
+    noise = F.interpolate(noise,size=(H,W),mode='bilinear',align_corners=False)
+    kernel_size = int(2*round(2*sigma)+1)
+    coords = torch.arange(kernel_size, device=device).float() - kernel_size//2
+    gauss_1d = torch.exp(-0.5*(coords/sigma)**2)
+    gauss_1d /= gauss_1d.sum()
+    gauss_x = gauss_1d.view(1,1,1,-1)
+    gauss_y = gauss_1d.view(1,1,-1,1)
+    for c in range(2):
+        n=noise[:,c:c+1,:,:]
+        n=F.conv2d(n,gauss_x,padding=(0,kernel_size//2))
+        n=F.conv2d(n,gauss_y,padding=(kernel_size//2,0))
+        noise[:,c:c+1,:,:]=n
+
+    yy,xx=torch.meshgrid(torch.linspace(-1,1,H,device=device),
+                         torch.linspace(-1,1,W,device=device),
+                         indexing='ij')
+    base_grid = torch.stack((xx,yy),dim=-1).unsqueeze(0).repeat(B,1,1,1)
+    norm_noise = noise / torch.tensor([W/2,H/2],device=device).view(1,2,1,1)
+    norm_noise = norm_noise.permute(0,2,3,1)
+    flow_grid = base_grid + norm_noise
+    warped = F.grid_sample(semantic_float, flow_grid, mode='nearest', padding_mode='reflection', align_corners=False)
+
+    # --- (2) Detectar bordes ---
+    pad = neighborhood//2
+    max_pool = F.max_pool2d(warped, kernel_size=neighborhood, stride=1, padding=pad)
+    min_pool = -F.max_pool2d(-warped, kernel_size=neighborhood, stride=1, padding=pad)
+    border_mask = (max_pool != min_pool).float()
+
+    # --- (3) Para cada píxel de borde, elegir aleatoriamente una clase vecina ---
+    # Extraer ventanas usando unfold
+    unfolded = F.unfold(warped, kernel_size=neighborhood, padding=pad)  # (B, neighborhood^2, H*W)
+    # Convertimos a int para manejar clases
+    unfolded_int = unfolded.to(torch.int64)
+    # Creamos tensor para clases únicas (por ventana)
+    B_, K, N = unfolded_int.shape
+    new_classes = torch.zeros_like(warped)
+    for b in range(B_):
+        vals = unfolded_int[b]  # (K, H*W)
+        # Selección aleatoria de clase vecina
+        idx = torch.randint(0, K, (N,), device=device)
+        new_classes[b,0].view(-1).copy_(vals[idx, torch.arange(N, device=device)])
+    # Mezclamos solo donde hay borde
+    mixed = warped*(1-border_mask) + new_classes*border_mask
+
+    # --- (4) Convertir a int ---
+    semantic_result_int = mixed.to(torch.int32).permute(0,2,3,1)
+
+    # --- (5) RGB ---
+    observations_mult = semantic_result_int * sem_constant
+    rgb_matrix = torch.zeros((B,H,W,3),dtype=torch.float32,device=device)
+    rgb_matrix[:,:,:,0] = (observations_mult[:,:,:,0] >> 16) & 0xFF
+    rgb_matrix[:,:,:,1] = (observations_mult[:,:,:,0] >> 8) & 0xFF
+    rgb_matrix[:,:,:,2] = observations_mult[:,:,:,0] & 0xFF
+
+    return rgb_matrix
+
+@baseline_registry.register_trainer(name="pirlnav-il")
 class ILEnvDDPTrainer(PPOTrainer):
     def __init__(self, config=None):
         super().__init__(config)
-        #self.gss = GlobalSemantic()
+
+        # LOAD ESANET
+        self.segmentator_path = 'ESANet/trained_models/nyuv2_r34_NBt1D_scenenet/nyuv2/r34_NBt1D_scenenet.pth'
+        self.segmentator_args = SimpleNamespace(activation='relu',aug_scale_max=1.4,aug_scale_min=1.0,batch_size=8,batch_size_valid=None,c_for_logarithmic_weighting=1.02, channels_decoder=128, ckpt_path=self.segmentator_path, class_weighting='median_frequency', context_module='ppm', dataset='nyuv2', dataset_dir=None, debug=False, decoder_channels_mode='decreasing', depth_scale=0.1, encoder='resnet34', encoder_block='NonBottleneck1D', encoder_decoder_fusion='add', encoder_depth=None, epochs=500, finetune=None, freeze=0, fuse_depth_in_rgb_encoder='SE-add', he_init=False, height=480, last_ckpt="", lr=0.01, modality='rgbd', momentum=0.9, nr_decoder_blocks=[3], optimizer='SGD', pretrained_dir='./trained_models/imagenet', pretrained_on_imagenet=False, pretrained_scenenet="", raw_depth=True, upsampling='learned-3x3-zeropad', valid_full_res=False, weight_decay=0.0001, width=640, workers=8)
+        self.segmentator_args.pretrained_on_imagenet = False
+        self.ESANET_dataset, self.ESANET_preprocessor = prepare_data(self.segmentator_args,with_input_orig=False)
+        self.ESANET_n_classes = self.ESANET_dataset.n_classes_without_void
+        self.ESANET_color_constant = np.floor((255*255*255)/40)
+        self.seg_model, self.segmentator_device = build_model(self.segmentator_args, n_classes=self.ESANET_n_classes)
+        # Prefer GPU for the segmentator if available to avoid CPU<->GPU copies
+
+        self.ESANET_checkpoint = torch.load(self.segmentator_args.ckpt_path,
+                                map_location=lambda storage, loc: storage)
+        self.seg_model.load_state_dict(self.ESANET_checkpoint['state_dict'])
+        print('Loaded ESANet model from {}'.format(self.segmentator_args.ckpt_path))
+        self.seg_model.eval()
+        self.seg_model.to(self.segmentator_device)
+
+        # Constant for semantic RGB to class conversion
+        self.constant = int(np.floor((255*255*255)/self.config.NUM_CATEGORIES))
+
+        # Add noise to semantic segmentation
+        self.add_noise = self.config.ADD_NOISE
+
+        self.use_esanet = self.config.USE_ESANET
 
     def _setup_actor_critic_agent(self, il_cfg: Config) -> None:
         r"""Sets up actor critic and agent for IL.
@@ -100,6 +452,7 @@ class ILEnvDDPTrainer(PPOTrainer):
                 max_grad_norm=il_cfg.max_grad_norm,
                 wd=il_cfg.wd,
                 entropy_coef=il_cfg.entropy_coef,
+                semantic_constant = self.constant
             )
         else:
             self.agent = DDPILAgent(
@@ -267,29 +620,7 @@ class ILEnvDDPTrainer(PPOTrainer):
         if 'semantic' in obs_space.spaces:
             for i in range(self.envs.num_envs):
                 observations[i]["semantic_rgb"] = np.zeros([480,640,3])
-        # observations_mult = np.array([diccionario['semantic'] for diccionario in observations])
-        # observations_mult *= 17
-        # matriz_rgb = np.zeros((2, 480, 640, 3), dtype=np.uint8)
-        # matriz_rgb[:, :, :, 0] = (observations_mult[:, :, :, 0] >> 16) & 0xFF  # R
-        # matriz_rgb[:, :, :, 1] = (observations_mult[:, :, :, 0] >> 8) & 0xFF  # G
-        # matriz_rgb[:, :, :, 2] = observations_mult[:, :, :, 0] & 0xFF  # B
-        # for i in range(self.envs.num_envs):
-        #     observations[i]["semantic_rgb"] = matriz_rgb[i,:,:,:]
         ###########
-        #########
-        # current_episode = self.envs.current_episodes()
-        # for i in range(self.envs.num_envs):
-        #     print("ey")
-        #     print(current_episode[i].scene_id)
-        # current_episode = self.envs.current_episodes() #Esto no actualiza posiciones de ningún tipo, es idempotente
-        # scene_id = [None] * self.envs.num_envs
-        # for i in range(self.envs.num_envs):
-        #     scene_id[i] = current_episode[i].scene_id
-        #     scene_cut_id = re.findall(self.gss.patron, scene_id[i])
-        #     semantic_rgb_values = np.array(list(self.gss.allscenes_rgb_dictionary[scene_cut_id[0]].values()))
-        #     observations[i]["semantic_rgb"] = np.squeeze(semantic_rgb_values[observations[i]['semantic']])
-
-        ############
         batch = batch_obs(
             observations, device=self.device, cache=self._obs_batching_cache
         )
@@ -327,19 +658,6 @@ class ILEnvDDPTrainer(PPOTrainer):
             env_slice,
         ]
 
-        #print(self.envs.current_episodes())
-        # current_episode = self.envs.current_episodes() #Esto no actualiza posiciones de ningún tipo, es idempotente
-        # scene_id = [None] * self.envs.num_envs
-        # step_batch["observations"]['semantic'].putpalette(d3_40_colors_rgb.flatten())
-        # step_batch["observations"]['semantic'].putdata((step_batch["observations"]['semantic'].flatten() % 40).astype(np.uint8))
-        # step_batch["observations"]['semantic'] = step_batch["observations"]['semantic'].convert("RGBA")
-
-        # semantic_txt_path = [None] * self.envs.num_envs
-        # for i in range(self.envs.num_envs):
-        #     scene_id[i] = current_episode[i].scene_id
-        #     scene_cut_id = re.findall(self.gss.patron, scene_id[i])
-        #     semantic_rgb_values = torch.tensor(list(self.gss.allscenes_rgb_dictionary[scene_cut_id[0]].values()))
-        #     step_batch["observations"]["semantic_rgb"][i] = semantic_rgb_values[step_batch["observations"]['semantic'][i].long()].squeeze(2)
         next_actions = step_batch["observations"]["next_actions"]
         actions = next_actions.long().unsqueeze(-1)
 
@@ -653,314 +971,392 @@ class ILEnvDDPTrainer(PPOTrainer):
         Returns:
             None
         """
-        for seed in random.sample(range(10000), 14):
-            # Set the random seeds for consistent evaluation
-            random.seed(seed)
-            np.random.seed(seed)
-            torch.manual_seed(seed)
+        if self._is_distributed:
+            raise RuntimeError("Evaluation does not support distributed mode")
 
-            if self._is_distributed:
-                raise RuntimeError("Evaluation does not support distributed mode")
+        # Map location CPU is almost always better than mapping to a CUDA device.
+        if self.config.EVAL.SHOULD_LOAD_CKPT:
+            ckpt_dict = self.load_checkpoint(
+                checkpoint_path, map_location="cpu"
+            )
+        else:
+            ckpt_dict = {}
 
-            # Map location CPU is almost always better than mapping to a CUDA device.
-            if self.config.EVAL.SHOULD_LOAD_CKPT:
-                ckpt_dict = self.load_checkpoint(
-                    checkpoint_path, map_location="cpu"
-                )
-            else:
-                ckpt_dict = {}
+        if self.config.EVAL.USE_CKPT_CONFIG:
+            config = self._setup_eval_config(ckpt_dict["config"])
+        else:
+            config = self.config.clone()
 
-            if self.config.EVAL.USE_CKPT_CONFIG:
-                config = self._setup_eval_config(ckpt_dict["config"])
-            else:
-                config = self.config.clone()
+        config.defrost()
+        config.TASK_CONFIG.DATASET.SPLIT = config.EVAL.SPLIT
+        config.TASK_CONFIG.DATASET.TYPE = "ObjectNav-v1"
+        config.freeze()
 
+        if (
+            len(self.config.VIDEO_OPTION) > 0
+            and self.config.VIDEO_RENDER_TOP_DOWN
+        ):
             config.defrost()
-            config.TASK_CONFIG.DATASET.SPLIT = config.EVAL.SPLIT
-            config.TASK_CONFIG.DATASET.TYPE = "ObjectNav-v1"
+            config.TASK_CONFIG.TASK.MEASUREMENTS.append("TOP_DOWN_MAP")
+            config.TASK_CONFIG.TASK.MEASUREMENTS.append("COLLISIONS")
             config.freeze()
 
-            if (
-                len(self.config.VIDEO_OPTION) > 0
-                and self.config.VIDEO_RENDER_TOP_DOWN
-            ):
-                config.defrost()
-                config.TASK_CONFIG.TASK.MEASUREMENTS.append("TOP_DOWN_MAP")
-                config.TASK_CONFIG.TASK.MEASUREMENTS.append("COLLISIONS")
-                config.freeze()
+        if config.VERBOSE:
+            logger.info(f"env config: {config}")
 
-            if config.VERBOSE:
-                logger.info(f"env config: {config}")
+        self._init_envs(config)
 
-            self._init_envs(config)
-
-            action_space = self.envs.action_spaces[0]
-            if self.using_velocity_ctrl:
-                # For navigation using a continuous action space for a task that
-                # may be asking for discrete actions
-                self.policy_action_space = action_space["VELOCITY_CONTROL"]
-                action_shape = (2,)
+        action_space = self.envs.action_spaces[0]
+        if self.using_velocity_ctrl:
+            # For navigation using a continuous action space for a task that
+            # may be asking for discrete actions
+            self.policy_action_space = action_space["VELOCITY_CONTROL"]
+            action_shape = (2,)
+            discrete_actions = False
+        else:
+            self.policy_action_space = action_space
+            if is_continuous_action_space(action_space):
+                # Assume NONE of the actions are discrete
+                action_shape = (get_num_actions(action_space),)
                 discrete_actions = False
             else:
-                self.policy_action_space = action_space
-                if is_continuous_action_space(action_space):
-                    # Assume NONE of the actions are discrete
-                    action_shape = (get_num_actions(action_space),)
-                    discrete_actions = False
-                else:
-                    # For discrete pointnav
-                    action_shape = (1,)
-                    discrete_actions = True
+                # For discrete pointnav
+                action_shape = (1,)
+                discrete_actions = True
 
-            il_cfg = config.IL.BehaviorCloning
-            policy_cfg = config.POLICY
-            self._setup_actor_critic_agent(il_cfg)
+        il_cfg = config.IL.BehaviorCloning
+        policy_cfg = config.POLICY
+        self._setup_actor_critic_agent(il_cfg)
 
-            if self.agent.actor_critic.should_load_agent_state:
-                self.agent.load_state_dict({
-                    k.replace("model.", "actor_critic."): v
-                    for k, v in ckpt_dict["state_dict"].items()
-                })
-            self.actor_critic = self.agent.actor_critic
+        if self.agent.actor_critic.should_load_agent_state:
+            self.agent.load_state_dict({
+                k.replace("model.", "actor_critic."): v
+                for k, v in ckpt_dict["state_dict"].items()
+            })
+        self.actor_critic = self.agent.actor_critic
 
-            observations = self.envs.reset()
-            batch = batch_obs(
-                observations, device=self.device, cache=self._obs_batching_cache
+        observations = self.envs.reset()
+        batch = batch_obs(
+            observations, device=self.device, cache=self._obs_batching_cache
+        )
+        if self.add_noise:
+            # Aplicar ruido con bordes difuminados
+            batch["semantic_rgb"] = add_semantic_class_confusion(batch["semantic"],prob=0.1, num_classes=40, sem_constant=self.constant)
+            batch["semantic"] = semantic_rgb_to_classes(batch["semantic_rgb"], self.constant)
+            batch["semantic_rgb"]=add_semantic_noise_with_true_adjacent(batch["semantic"], sigma=1.5, warp_strength=5.0, neighborhood=3)
+        # En tu código de evaluación:
+
+            batch["semantic"] = semantic_rgb_to_classes(batch["semantic_rgb"], self.constant)
+            batch["semantic_rgb"] = add_semantic_class_blobs_perlin(
+                batch["semantic"], num_blobs_range=(1, 10), blob_scale=50
             )
-            constant = 414534
-            # constant = 9994
 
-            observations_mult = batch["semantic"] * constant
+        elif self.use_esanet:
 
-            rgb_matrix = torch.zeros((observations_mult.size(0), 480, 640, 3), dtype=torch.uint8,
-                                     device=observations_mult.device)
-            rgb_matrix[:, :, :, 0] = (observations_mult[:, :, :, 0] >> 16) & 0xFF  # R
-            rgb_matrix[:, :, :, 1] = (observations_mult[:, :, :, 0] >> 8) & 0xFF  # G
-            rgb_matrix[:, :, :, 2] = observations_mult[:, :, :, 0] & 0xFF  # B
+            rgb_batch = batch['rgb'].cpu().numpy()  # -> (B, 3, H, W)
+            depth_batch = batch['depth'].cpu().numpy()  # -> (B, 1, H, W)
+            depth_batch = (depth_batch * 1000).astype(np.uint16)
 
+            rgb_list = [np.transpose(rgb, (0, 1, 2)).copy() for rgb in rgb_batch]  # (H, W, 3)
+            depth_list = [np.transpose(depth, (0, 1, 2)).copy() for depth in depth_batch]  # (H, W)
+
+            sample_to_semantic = [self.ESANET_preprocessor({'image': rgb, 'depth': depth}) for rgb, depth in
+                                  zip(rgb_list, depth_list)]
+            image_sem = torch.stack([s['image'] for s in sample_to_semantic]).to(
+                self.segmentator_device)  # (B, 3, H, W)
+            depth_sem = torch.stack([s['depth'] for s in sample_to_semantic]).to(
+                self.segmentator_device)  # (B, 1, H, W)
+
+            pred = self.seg_model(image_sem, depth_sem)  # (B, num_classes, H, W)
+
+            pred = F.interpolate(pred, size=(480, 640), mode='bilinear',
+                                 align_corners=False)  # (B, num_classes, 480, 640)
+
+            pred = torch.argmax(pred, dim=1)  # (B, 480, 640)
+
+            pred = pred.cpu().numpy().astype(np.uint8) + 1
+            pred = pred * self.ESANET_color_constant
+            B, H, W = pred.shape
+            pred_uint64 = pred.astype(np.uint64)
+
+            rgb_matrix = np.zeros((B, H, W, 3), dtype=np.uint8)
+
+            rgb_matrix[..., 0] = (pred_uint64 >> 16) & 0xFF  # R
+            rgb_matrix[..., 1] = (pred_uint64 >> 8) & 0xFF  # G
+            rgb_matrix[..., 2] = pred_uint64 & 0xFF  # B
             batch["semantic_rgb"] = rgb_matrix
+            rgb_matrix_uint8 = rgb_matrix.astype(np.uint8)
+
+            # Convertimos a tensor
+            semantic_rgb_tensor = torch.from_numpy(rgb_matrix_uint8)  # dtype torch.uint8, shape (B, H, W, 3)
+
+            # Guardamos en el batch
+            batch["semantic_rgb"] = semantic_rgb_tensor.to(self.device)
+
+        else:
+            batch["semantic_rgb"] = classes_to_semantic_rgb(batch["semantic"], self.constant)
+
+        batch = apply_obs_transforms_batch(batch, self.obs_transforms)  # type: ignore
+
+        current_episode_reward = torch.zeros(
+            self.envs.num_envs, 1, device="cpu"
+        )
+
+        test_recurrent_hidden_states = torch.zeros(
+            self.config.NUM_ENVIRONMENTS,
+            self.actor_critic.net.num_recurrent_layers,
+            policy_cfg.STATE_ENCODER.hidden_size,
+            device=self.device,
+        )
+        prev_actions = torch.zeros(
+            self.config.NUM_ENVIRONMENTS,
+            *action_shape,
+            device=self.device,
+            dtype=torch.long if discrete_actions else torch.float,
+        )
+        not_done_masks = torch.zeros(
+            self.config.NUM_ENVIRONMENTS,
+            1,
+            device=self.device,
+            dtype=torch.bool,
+        )
+        stats_episodes: Dict[
+            Any, Any
+        ] = {}  # dict of dicts that stores stats per episode
+
+        rgb_frames = [
+            [] for _ in range(self.config.NUM_ENVIRONMENTS)
+        ]  # type: List[List[np.ndarray]]
+        if len(self.config.VIDEO_OPTION) > 0:
+            os.makedirs(self.config.VIDEO_DIR, exist_ok=True)
+
+        number_of_eval_episodes = self.config.TEST_EPISODE_COUNT
+        if number_of_eval_episodes == -1:
+            number_of_eval_episodes = sum(self.envs.number_of_episodes)
+        else:
+            total_num_eps = sum(self.envs.number_of_episodes)
+            if total_num_eps < number_of_eval_episodes:
+                logger.warn(
+                    f"Config specified {number_of_eval_episodes} eval episodes"
+                    ", dataset only has {total_num_eps}."
+                )
+                logger.warn(f"Evaluating with {total_num_eps} instead.")
+                number_of_eval_episodes = total_num_eps
+
+        pbar = tqdm.tqdm(total=number_of_eval_episodes)
+        logger.info("Sampling actions deterministically...")
+        self.actor_critic.eval()
+        while (
+            len(stats_episodes) < number_of_eval_episodes
+            and self.envs.num_envs > 0
+        ):
+            current_episodes = self.envs.current_episodes()
+            with torch.no_grad():
+                actions, test_recurrent_hidden_states = self.actor_critic.act(
+                    batch,
+                    test_recurrent_hidden_states,
+                    prev_actions,
+                    not_done_masks,
+                    deterministic=True,
+                )
+                # batch["rgb"] = torch.zeros(2,480,640,3).to("cuda:0")
+                # (
+                #     actions,
+                #     test_recurrent_hidden_states,
+                # ) = self.actor_critic.act(
+                #     batch,
+                #     prueba_test_recurrent_hidden_states,
+                #     prev_actions,
+                #     not_done_masks,
+                #     deterministic=True,
+                # )
+                prev_actions.copy_(actions)  # type: ignore
+            # NB: Move actions to CPU.  If CUDA tensors are
+            # sent in to env.step(), that will create CUDA contexts
+            # in the subprocesses.
+            # For backwards compatibility, we also call .item() to convert to
+            # an int
+            if actions[0].shape[0] > 1:
+                step_data = [
+                    action_array_to_dict(self.policy_action_space, a)
+                    for a in actions.to(device="cpu")
+                ]
+            else:
+                step_data = [a.item() for a in actions.to(device="cpu")]
+
+            outputs = self.envs.step(step_data)
+
+            observations, rewards_l, dones, infos = [
+                list(x) for x in zip(*outputs)
+            ]
+            batch = batch_obs(  # type: ignore
+                observations,
+                device=self.device,
+                cache=self._obs_batching_cache,
+            )
+            if self.add_noise:
+                # Aplicar ruido con bordes difuminados
+                batch["semantic_rgb"] = add_semantic_class_confusion(batch["semantic"], prob=0.1, num_classes=40, sem_constant=self.constant)
+                batch["semantic"] = semantic_rgb_to_classes(batch["semantic_rgb"], self.constant)
+                batch["semantic_rgb"] = add_semantic_noise_with_true_adjacent(batch["semantic"], sigma=1.5,
+                                                                              warp_strength=5.0, neighborhood=3)
+                # En tu código de evaluación:
+
+                batch["semantic"] = semantic_rgb_to_classes(batch["semantic_rgb"], self.constant)
+                batch["semantic_rgb"] = add_semantic_class_blobs_perlin(
+                    batch["semantic"], num_blobs_range=(1, 10), blob_scale=50
+                )
+            elif self.use_esanet:
+
+                rgb_batch = batch['rgb'].cpu().numpy()  # -> (B, 3, H, W)
+                depth_batch = batch['depth'].cpu().numpy()  # -> (B, 1, H, W)
+                depth_batch = (depth_batch * 1000).astype(np.uint16)
+
+                rgb_list = [np.transpose(rgb, (0, 1, 2)).copy() for rgb in rgb_batch]  # (H, W, 3)
+                depth_list = [np.transpose(depth, (0, 1, 2)).copy() for depth in depth_batch]  # (H, W)
+
+                sample_to_semantic = [self.ESANET_preprocessor({'image': rgb, 'depth': depth}) for rgb, depth in
+                                      zip(rgb_list, depth_list)]
+                image_sem = torch.stack([s['image'] for s in sample_to_semantic]).to(
+                    self.segmentator_device)  # (B, 3, H, W)
+                depth_sem = torch.stack([s['depth'] for s in sample_to_semantic]).to(
+                    self.segmentator_device)  # (B, 1, H, W)
+
+                pred = self.seg_model(image_sem, depth_sem)  # (B, num_classes, H, W)
+
+                pred = F.interpolate(pred, size=(480, 640), mode='bilinear',
+                                     align_corners=False)  # (B, num_classes, 480, 640)
+
+                pred = torch.argmax(pred, dim=1)  # (B, 480, 640)
+
+                pred = pred.cpu().numpy().astype(np.uint8) + 1
+                pred = pred * self.ESANET_color_constant
+                B, H, W = pred.shape
+                pred_uint64 = pred.astype(np.uint64)
+
+                rgb_matrix = np.zeros((B, H, W, 3), dtype=np.uint8)
+
+                rgb_matrix[..., 0] = (pred_uint64 >> 16) & 0xFF  # R
+                rgb_matrix[..., 1] = (pred_uint64 >> 8) & 0xFF  # G
+                rgb_matrix[..., 2] = pred_uint64 & 0xFF  # B
+                batch["semantic_rgb"] = rgb_matrix
+                rgb_matrix_uint8 = rgb_matrix.astype(np.uint8)
+
+                # Convertimos a tensor
+                semantic_rgb_tensor = torch.from_numpy(rgb_matrix_uint8)  # dtype torch.uint8, shape (B, H, W, 3)
+
+                # Guardamos en el batch
+                batch["semantic_rgb"] = semantic_rgb_tensor.to(self.device)
+            else:
+                batch["semantic_rgb"] = classes_to_semantic_rgb(batch["semantic"], self.constant)
+
             batch = apply_obs_transforms_batch(batch, self.obs_transforms)  # type: ignore
 
-            current_episode_reward = torch.zeros(
-                self.envs.num_envs, 1, device="cpu"
-            )
-
-            test_recurrent_hidden_states = torch.zeros(
-                self.config.NUM_ENVIRONMENTS,
-                self.actor_critic.net.num_recurrent_layers,
-                policy_cfg.STATE_ENCODER.hidden_size,
-                device=self.device,
-            )
-            prev_actions = torch.zeros(
-                self.config.NUM_ENVIRONMENTS,
-                *action_shape,
-                device=self.device,
-                dtype=torch.long if discrete_actions else torch.float,
-            )
-            not_done_masks = torch.zeros(
-                self.config.NUM_ENVIRONMENTS,
-                1,
-                device=self.device,
+            not_done_masks = torch.tensor(
+                [[not done] for done in dones],
                 dtype=torch.bool,
-            )
-            stats_episodes: Dict[
-                Any, Any
-            ] = {}  # dict of dicts that stores stats per episode
-
-            rgb_frames = [
-                [] for _ in range(self.config.NUM_ENVIRONMENTS)
-            ]  # type: List[List[np.ndarray]]
-            if len(self.config.VIDEO_OPTION) > 0:
-                os.makedirs(self.config.VIDEO_DIR, exist_ok=True)
-
-            number_of_eval_episodes = self.config.TEST_EPISODE_COUNT
-            if number_of_eval_episodes == -1:
-                number_of_eval_episodes = sum(self.envs.number_of_episodes)
-            else:
-                total_num_eps = sum(self.envs.number_of_episodes)
-                if total_num_eps < number_of_eval_episodes:
-                    logger.warn(
-                        f"Config specified {number_of_eval_episodes} eval episodes"
-                        ", dataset only has {total_num_eps}."
-                    )
-                    logger.warn(f"Evaluating with {total_num_eps} instead.")
-                    number_of_eval_episodes = total_num_eps
-
-            pbar = tqdm.tqdm(total=number_of_eval_episodes)
-            logger.info("Sampling actions deterministically...")
-            self.actor_critic.eval()
-            while (
-                len(stats_episodes) < number_of_eval_episodes
-                and self.envs.num_envs > 0
-            ):
-                current_episodes = self.envs.current_episodes()
-
-                with torch.no_grad():
-                    prueba_test_recurrent_hidden_states = test_recurrent_hidden_states
-                    (
-                        actions,
-                        test_recurrent_hidden_states,
-                    ) = self.actor_critic.act(
-                        batch,
-                        test_recurrent_hidden_states,
-                        prev_actions,
-                        not_done_masks,
-                        deterministic=True,
-                    )
-                    # batch["rgb"] = torch.zeros(2,480,640,3).to("cuda:0")
-                    # (
-                    #     actions,
-                    #     test_recurrent_hidden_states,
-                    # ) = self.actor_critic.act(
-                    #     batch,
-                    #     prueba_test_recurrent_hidden_states,
-                    #     prev_actions,
-                    #     not_done_masks,
-                    #     deterministic=True,
-                    # )
-                    prev_actions.copy_(actions)  # type: ignore
-                # NB: Move actions to CPU.  If CUDA tensors are
-                # sent in to env.step(), that will create CUDA contexts
-                # in the subprocesses.
-                # For backwards compatibility, we also call .item() to convert to
-                # an int
-                if actions[0].shape[0] > 1:
-                    step_data = [
-                        action_array_to_dict(self.policy_action_space, a)
-                        for a in actions.to(device="cpu")
-                    ]
-                else:
-                    step_data = [a.item() for a in actions.to(device="cpu")]
-
-                outputs = self.envs.step(step_data)
-
-                observations, rewards_l, dones, infos = [
-                    list(x) for x in zip(*outputs)
-                ]
-                batch = batch_obs(  # type: ignore
-                    observations,
-                    device=self.device,
-                    cache=self._obs_batching_cache,
-                )
-                constant = 414534
-                # constant = 9994
-
-                observations_mult = batch["semantic"] * constant
-
-                rgb_matrix = torch.zeros((observations_mult.size(0), 480, 640, 3), dtype=torch.uint8, device=observations_mult.device)
-                rgb_matrix[:, :, :, 0] = (observations_mult[:, :, :, 0] >> 16) & 0xFF  # R
-                rgb_matrix[:, :, :, 1] = (observations_mult[:, :, :, 0] >> 8) & 0xFF  # G
-                rgb_matrix[:, :, :, 2] = observations_mult[:, :, :, 0] & 0xFF  # B
-
-                batch["semantic_rgb"] = rgb_matrix
-                batch = apply_obs_transforms_batch(batch, self.obs_transforms)  # type: ignore
-
-                not_done_masks = torch.tensor(
-                    [[not done] for done in dones],
-                    dtype=torch.bool,
-                    device="cpu",
-                )
-
-                rewards = torch.tensor(
-                    rewards_l, dtype=torch.float, device="cpu"
-                ).unsqueeze(1)
-                current_episode_reward += rewards
-                next_episodes = self.envs.current_episodes()
-                envs_to_pause = []
-                n_envs = self.envs.num_envs
-                for i in range(n_envs):
-                    if (
-                        next_episodes[i].scene_id,
-                        next_episodes[i].episode_id,
-                    ) in stats_episodes:
-                        envs_to_pause.append(i)
-
-                    # episode ended
-                    if not not_done_masks[i].item():
-                        pbar.update()
-                        episode_stats = {
-                            "reward": current_episode_reward[i].item()
-                        }
-                        episode_stats.update(
-                            self._extract_scalars_from_info(infos[i])
-                        )
-                        current_episode_reward[i] = 0
-                        # use scene_id + episode_id as unique id for storing stats
-                        stats_episodes[
-                            (
-                                current_episodes[i].scene_id,
-                                current_episodes[i].episode_id,
-                            )
-                        ] = episode_stats
-
-                        if len(self.config.VIDEO_OPTION) > 0:
-                            generate_video(
-                                video_option=self.config.VIDEO_OPTION,
-                                video_dir=self.config.VIDEO_DIR,
-                                images=rgb_frames[i],
-                                episode_id=current_episodes[i].episode_id,
-                                checkpoint_idx=checkpoint_index,
-                                metrics=self._extract_scalars_from_info(infos[i]),
-                                fps=self.config.VIDEO_FPS,
-                                tb_writer=writer,
-                                keys_to_include_in_name=self.config.EVAL_KEYS_TO_INCLUDE_IN_NAME,
-                            )
-
-                            rgb_frames[i] = []
-
-                    # episode continues
-                    elif len(self.config.VIDEO_OPTION) > 0:
-                        # TODO move normalization / channel changing out of the policy and undo it here
-                        frame = observations_to_image(
-                            {k: v[i] for k, v in batch.items()}, infos[i]
-                        )
-                        if self.config.VIDEO_RENDER_ALL_INFO:
-                            frame = overlay_frame(frame, infos[i])
-
-                        rgb_frames[i].append(frame)
-
-                not_done_masks = not_done_masks.to(device=self.device)
-                (
-                    self.envs,
-                    test_recurrent_hidden_states,
-                    not_done_masks,
-                    current_episode_reward,
-                    prev_actions,
-                    batch,
-                    rgb_frames,
-                ) = self._pause_envs(
-                    envs_to_pause,
-                    self.envs,
-                    test_recurrent_hidden_states,
-                    not_done_masks,
-                    current_episode_reward,
-                    prev_actions,
-                    batch,
-                    rgb_frames,
-                )
-
-            num_episodes = len(stats_episodes)
-            aggregated_stats = {}
-            for stat_key in next(iter(stats_episodes.values())).keys():
-                aggregated_stats[stat_key] = (
-                    sum(v[stat_key] for v in stats_episodes.values())
-                    / num_episodes
-                )
-
-            for k, v in aggregated_stats.items():
-                logger.info(f"Average episode {k}: {v:.4f}")
-            logger.info(f"Seed: {seed}")
-
-            step_id = checkpoint_index
-            if "extra_state" in ckpt_dict and "step" in ckpt_dict["extra_state"]:
-                step_id = ckpt_dict["extra_state"]["step"]
-
-            writer.add_scalar(
-                "eval_reward/average_reward", aggregated_stats["reward"], step_id
+                device="cpu",
             )
 
-            metrics = {k: v for k, v in aggregated_stats.items() if k != "reward"}
-            for k, v in metrics.items():
-                writer.add_scalar(f"eval_metrics/{k}", v, step_id)
+            rewards = torch.tensor(
+                rewards_l, dtype=torch.float, device="cpu"
+            ).unsqueeze(1)
+            current_episode_reward += rewards
+            next_episodes = self.envs.current_episodes()
+            envs_to_pause = []
+            n_envs = self.envs.num_envs
+            for i in range(n_envs):
+                if (
+                    next_episodes[i].scene_id,
+                    next_episodes[i].episode_id,
+                ) in stats_episodes:
+                    envs_to_pause.append(i)
 
-            self.envs.close()
+                # episode ended
+                if not not_done_masks[i].item():
+                    pbar.update()
+                    episode_stats = {
+                        "reward": current_episode_reward[i].item()
+                    }
+                    episode_stats.update(
+                        self._extract_scalars_from_info(infos[i])
+                    )
+                    current_episode_reward[i] = 0
+                    # use scene_id + episode_id as unique id for storing stats
+                    stats_episodes[
+                        (
+                            current_episodes[i].scene_id,
+                            current_episodes[i].episode_id,
+                        )
+                    ] = episode_stats
+
+                    if len(self.config.VIDEO_OPTION) > 0:
+                        generate_video(
+                            video_option=self.config.VIDEO_OPTION,
+                            video_dir=self.config.VIDEO_DIR,
+                            images=rgb_frames[i],
+                            episode_id=current_episodes[i].episode_id,
+                            checkpoint_idx=checkpoint_index,
+                            metrics=self._extract_scalars_from_info(infos[i]),
+                            fps=self.config.VIDEO_FPS,
+                            tb_writer=writer,
+                            keys_to_include_in_name=self.config.EVAL_KEYS_TO_INCLUDE_IN_NAME,
+                        )
+
+                        rgb_frames[i] = []
+
+                # episode continues
+                elif len(self.config.VIDEO_OPTION) > 0:
+                    frame = observations_to_image(
+                        {k: v[i] for k, v in batch.items()}, infos[i]
+                    )
+                    if self.config.VIDEO_RENDER_ALL_INFO:
+                        frame = overlay_frame(frame, infos[i])
+
+                    rgb_frames[i].append(frame)
+
+            not_done_masks = not_done_masks.to(device=self.device)
+            (
+                self.envs,
+                test_recurrent_hidden_states,
+                not_done_masks,
+                current_episode_reward,
+                prev_actions,
+                batch,
+                rgb_frames,
+            ) = self._pause_envs(
+                envs_to_pause,
+                self.envs,
+                test_recurrent_hidden_states,
+                not_done_masks,
+                current_episode_reward,
+                prev_actions,
+                batch,
+                rgb_frames,
+            )
+
+        num_episodes = len(stats_episodes)
+        aggregated_stats = {}
+        for stat_key in next(iter(stats_episodes.values())).keys():
+            aggregated_stats[stat_key] = (
+                sum(v[stat_key] for v in stats_episodes.values())
+                / num_episodes
+            )
+
+        for k, v in aggregated_stats.items():
+            logger.info(f"Average episode {k}: {v:.4f}")
+
+        step_id = checkpoint_index
+        if "extra_state" in ckpt_dict and "step" in ckpt_dict["extra_state"]:
+            step_id = ckpt_dict["extra_state"]["step"]
+
+        writer.add_scalar(
+            "eval_reward/average_reward", aggregated_stats["reward"], step_id
+        )
+
+        metrics = {k: v for k, v in aggregated_stats.items() if k != "reward"}
+        for k, v in metrics.items():
+            writer.add_scalar(f"eval_metrics/{k}", v, step_id)
+
+        self.envs.close()
+

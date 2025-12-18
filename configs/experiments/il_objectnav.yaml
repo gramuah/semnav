@@ -4,22 +4,29 @@ ENV_NAME: "SimpleRLEnv"
 WANDB_ENABLED: True
 SIMULATOR_GPU_ID: 0
 TORCH_GPU_ID: 0
-VIDEO_OPTION: []
-TENSORBOARD_DIR: "tb/check_RGBS_pretrained_seeds"
-VIDEO_DIR: "vidonlysem1630catpretrainedckpt8"
+VIDEO_OPTION: [disk]
+TENSORBOARD_DIR: "tb/semnav"
+VIDEO_DIR: "videos/semnav"
 TEST_EPISODE_COUNT: -1
-EVAL_CKPT_PATH_DIR: "data/checkpoints/RGBS_Pretrained.pth"
-NUM_ENVIRONMENTS: 4
-CHECKPOINT_FOLDER: "data/checkpoints/RGBS_Pretrained.pth"
-TRAINER_NAME: "semnav-il"
+NUM_CATEGORIES: 40 #1659
+EVAL_CKPT_PATH_DIR: "RGBS_Pretrained_40cat.pth"
+NUM_ENVIRONMENTS: 8
+CHECKPOINT_FOLDER: "semnav"
+TRAINER_NAME: "pirlnav-il"
 
 SENSORS: ["RGB_SENSOR","SEMANTIC_SENSOR"]
+#SENSORS: ["RGB_SENSOR","SEMANTIC_SENSOR", "DEPTH_SENSOR"]
 #SENSORS: ["RGB_SENSOR",]
 #SENSORS: ["SEMANTIC_SENSOR"]
 NUM_UPDATES: 3200000000
 LOG_INTERVAL: 10
 NUM_CHECKPOINTS: 30000
 
+
+##
+ADD_NOISE: False
+
+USE_ESANET: True
 
 # Force PyTorch to be single threaded as
 # this improves performance considerably
