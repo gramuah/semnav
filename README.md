@@ -19,7 +19,9 @@ In this repository we release the SemNav dataset, code and trained models detail
     journal={Applied Intelligence},
     year={2026},
     month={May},
-    day={02},    
+    day={19},
+    volume={56},
+    number={8},
     doi={10.1007/s10489-026-07275-1},
     url={ https://doi.org/10.1007/s10489-026-07275-1}
     }    
