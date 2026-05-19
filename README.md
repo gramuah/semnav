@@ -9,19 +9,19 @@ SemNav is a visual semantic navigation model ready to be deployed into any robot
 <img src="./imgs/graphical_abstract_semnav.png"  width="800px">
 </p>
 
-In this repository we release the SemNav dataset, code and trained models detailed in our <a href="https://arxiv.org/abs/2506.01418"> [paper]</a>.
+In this repository we release the SemNav dataset, code and trained models detailed in our <a href="https://link.springer.com/article/10.1007/s10489-026-07275-1"> [paper]</a>.
 
 **If you use any content of this repo for your work, please cite the following bib entry:**
 
     @article{semnav,
-    author={Flor-Rodr{\'i}guez, Rafael and Guti{\'e}rrez-{\'A}lvarez, Carlos and Acevedo-Rodr{\'i}guez, Francisco~J. and Lafuente-Arroyo, Sergio and L{\'o}pez-Sastre, Roberto~J.},
-    title={SEMNAV: A Semantic Segmentation-Driven Approach to Visual Semantic Navigation},
-    journal={ArXiv},
-    year={2025},
-    month={June},
+    author={Flor-Rodr{\'i}guez-Rabad{\'a}n, Rafael and Guti{\'e}rrez-{\'A}lvarez, Carlos and Acevedo-Rodr{\'i}guez, Francisco~J. and Lafuente-Arroyo, Sergio and L{\'o}pez-Sastre, Roberto~J.},
+    title={SEMNAV: Enhancing Visual Semantic Navigation in Robotics through Semantic Segmentation},
+    journal={Applied Intelligence},
+    year={2026},
+    month={May},
     day={02},    
-    doi={10.48550/arXiv.2506.01418},
-    url={https://doi.org/10.48550/arXiv.2506.01418}
+    doi={10.1007/s10489-026-07275-1},
+    url={ https://doi.org/10.1007/s10489-026-07275-1}
     }    
 
 
